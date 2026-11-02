@@ -1,9 +1,11 @@
 import os
+import importlib.util
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+
 # ==========================================
 # 1. Sayfa ve Genel Ayarlar
 # ==========================================
@@ -39,6 +41,22 @@ st.markdown("""
 
 
 # ==========================================
+# 1.1. "yönetici özeti.py" Modülünü Dinamik Yükleme
+# ==========================================
+def load_executive_module():
+    exec_path = os.path.join(os.path.dirname(__file__), "yönetici özeti.py")
+    if os.path.exists(exec_path):
+        spec = importlib.util.spec_from_file_location("yonetici_ozeti", exec_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    return None
+
+
+exec_module = load_executive_module()
+
+
+# ==========================================
 # 2. Veri Yükleme, Ön İşleme ve Önbellekleme
 # ==========================================
 @st.cache_data(show_spinner=True)
@@ -61,35 +79,77 @@ def load_and_preprocess_data():
         except Exception:
             pass
     else:
-        st.error("Veri dosyası bulunamadı! Lütfen 'B2B_Transaction_Data_.xlsx' dosyasını kontrol edin.")
+        st.error("Veri dosyası bulunamadı! Lütfen 'B2B_Transaction_Data_.parquet' veya 'B2B_Transaction_Data_.xlsx' dosyasını kontrol edin.")
         st.stop()
+
+    df.columns = [str(c).strip() for c in df.columns]
 
     # 2. Veri Tipleri ve Tarih Dönüşümleri
     df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'], errors='coerce')
-    df = df.dropna(subset=['InvoiceDate'])
+    df = df.dropna(subset=['InvoiceDate']).copy()
 
     # 3. İptal ve İade İşlemlerinin Tespiti
     # Fatura numarası 'C' ile başlayanlar veya negatif miktarlar iadedir
-    df['InvoiceNo_Str'] = df['InvoiceNo'].astype(str)
-    df['IsReturn'] = df['InvoiceNo_Str'].str.startswith('C') | (df['Quantity'] < 0)
+    df['InvoiceNo_Str'] = df['InvoiceNo'].astype(str).str.strip()
+    df['IsReturn'] = (
+        df['InvoiceNo_Str'].str.upper().str.startswith('C')
+        | df['InvoiceNo_Str'].str.upper().str.contains('IADE')
+        | (df['Quantity'] < 0)
+    )
 
-    # 4. Toplam Tutar (TotalAmount) Hesabı
-    df['UnitPrice'] = pd.to_numeric(df['UnitPrice'], errors='coerce').fillna(0)
-    df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0)
-    df['TotalAmount'] = df['Quantity'] * df['UnitPrice']
+    # 4. Toplam Tutar (TotalAmount), Brüt Tutar ve İskonto Hesabı
+    df['UnitPrice'] = pd.to_numeric(df['UnitPrice'], errors='coerce').fillna(0.0)
+    df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0.0)
+
+    if 'NetPrice' in df.columns:
+        df['NetPrice'] = pd.to_numeric(df['NetPrice'], errors='coerce').fillna(df['UnitPrice'])
+    else:
+        df['NetPrice'] = df['UnitPrice']
+
+    valid_mask = (df['UnitPrice'] > 0) & (df['Quantity'] > 0)
+    if 'NetPrice' in df.columns and valid_mask.any():
+        ratio_to_unit = (df.loc[valid_mask, 'NetPrice'] / df.loc[valid_mask, 'UnitPrice']).median()
+        if 0.1 <= ratio_to_unit <= 1.5:
+            df['GrossAmount'] = df['Quantity'] * df['UnitPrice']
+            df['TotalAmount'] = df['Quantity'] * df['NetPrice']
+        else:
+            df['GrossAmount'] = df['Quantity'] * df['UnitPrice']
+            df['TotalAmount'] = df['Quantity'] * df['UnitPrice']
+    else:
+        df['GrossAmount'] = df['Quantity'] * df['UnitPrice']
+        df['TotalAmount'] = df['GrossAmount']
+
+    df['DiscountAmount'] = np.maximum(0.0, df['GrossAmount'] - df['TotalAmount'])
 
     # 5. Zaman Bazlı Türetilmiş Değişkenler
     df['Year'] = df['InvoiceDate'].dt.year
     df['Month'] = df['InvoiceDate'].dt.month
+    df['Quarter'] = 'Q' + df['InvoiceDate'].dt.quarter.astype(str)
     df['YearMonth'] = df['InvoiceDate'].dt.to_period('M').astype(str)
+    df['YearWeek'] = df['InvoiceDate'].dt.to_period('W').apply(lambda r: r.start_time.strftime('%Y-%m-%d'))
     df['DayOfWeek'] = df['InvoiceDate'].dt.day_name()
     df['Date'] = df['InvoiceDate'].dt.date
 
     # 6. Eksik / Boş Değer Yönetimi
     if 'City' in df.columns:
-        df['City'] = df['City'].fillna('Bilinmiyor').astype(str)
+        df['City'] = df['City'].fillna('Bilinmiyor').astype(str).str.strip()
+    else:
+        df['City'] = 'Bilinmiyor'
+
+    if 'Category' in df.columns:
+        df['Category'] = df['Category'].fillna('Genel / Diğer').astype(str).str.strip()
+    else:
+        df['Category'] = 'Genel Kitap'
+
     if 'Description' in df.columns:
-        df['Description'] = df['Description'].fillna('Tanımsız Kitap').astype(str)
+        df['Description'] = df['Description'].fillna('Tanımsız Kitap').astype(str).str.strip()
+    else:
+        df['Description'] = 'Tanımsız Kitap'
+
+    if 'CustomerID' in df.columns:
+        df['CustomerID'] = df['CustomerID'].fillna('Anonim Bayi').astype(str).str.strip()
+    else:
+        df['CustomerID'] = df['City']
 
     return df
 
@@ -126,14 +186,36 @@ if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start_date, end_date = date_range
     active_df = active_df[(active_df['Date'] >= start_date) & (active_df['Date'] <= end_date)]
 
-# Şehir Filtresi
+# Şehir Kapsamı Filtresi
 available_cities = sorted(active_df['City'].unique())
-selected_cities = st.sidebar.multiselect("Şehirler", options=available_cities, default=available_cities[:10] if len(available_cities) > 10 else available_cities)
-
-if selected_cities:
-    filtered_df = active_df[active_df['City'].isin(selected_cities)]
+city_mode = st.sidebar.radio(
+    "Şehir Kapsamı",
+    options=["Tüm Şehirler", "Özel Şehir Seçimi"],
+    index=0
+)
+if city_mode == "Özel Şehir Seçimi":
+    selected_cities = st.sidebar.multiselect(
+        "Şehirler",
+        options=available_cities,
+        default=available_cities[:10] if len(available_cities) > 10 else available_cities
+    )
+    if selected_cities:
+        filtered_df = active_df[active_df['City'].isin(selected_cities)]
+    else:
+        filtered_df = active_df
 else:
     filtered_df = active_df
+
+# Kategori Filtresi
+available_categories = sorted(filtered_df['Category'].unique())
+selected_categories = st.sidebar.multiselect(
+    "Kategoriler (Opsiyonel)",
+    options=available_categories,
+    default=[],
+    placeholder="Tüm Kategoriler"
+)
+if selected_categories:
+    filtered_df = filtered_df[filtered_df['Category'].isin(selected_categories)]
 
 
 # ==========================================
@@ -144,14 +226,24 @@ st.markdown('<div class="sub-title">Satış, Pazarlama ve Tedarik Zinciri Yönet
 
 
 # ==========================================
-# 5. Departman Sekmeleri (Hiyerarşi)
+# 5. Departman Sekmeleri (Hiyerarşi - İlk Sayfa: Yönetici Özeti)
 # ==========================================
-tab_sales, tab_mkt, tab_scm, tab_prep = st.tabs([
+tab_exec, tab_sales, tab_mkt, tab_scm, tab_prep = st.tabs([
+    "🏛️ Yönetici Özeti",
     "📊 Satış Yönetimi",
     "🎯 Pazarlama & Müşteri",
     "🚚 Tedarik Zinciri & Stok",
     "🛠️ Veri Ön İşleme Raporu"
 ])
+
+# ------------------------------------------
+# SEKME 0 (İLK SAYFA): YÖNETİCİ ÖZETİ (yönetici özeti.py)
+# ------------------------------------------
+with tab_exec:
+    if exec_module is not None and hasattr(exec_module, "render_executive_summary"):
+        exec_module.render_executive_summary(filtered_df, raw_df)
+    else:
+        st.error("'yönetici özeti.py' modülü bulunamadı veya yüklenemedi.")
 
 # ------------------------------------------
 # SEKME 1: SATIŞ YÖNETİMİ
@@ -280,8 +372,8 @@ with tab_prep:
     st.markdown("""
     1. **Tarih Formatlama:** `InvoiceDate` sütunu `datetime64` formatına dönüştürüldü, geçersiz tarihli satırlar temizlendi.
     2. **İade ve İptal Ayrıştırması:** Fatura numarası `C` ile başlayan veya miktarı negatif olan işlemler `IsReturn` olarak etiketlendi ve opsiyonel filtrelendi.
-    3. **Türetilmiş Değişkenler:** `TotalAmount` ($Quantity \\times UnitPrice$), `YearMonth`, `DayOfWeek` türetildi.
-    4. **Eksik Değer Yönetimi:** Eksik şehirler ve tanımsız kitap açıklamaları uygun varsayılanlarla dolduruldu.
+    3. **Türetilmiş Değişkenler:** `TotalAmount` ($Quantity \\times NetPrice$), `GrossAmount`, `DiscountAmount`, `YearMonth`, `DayOfWeek` türetildi.
+    4. **Eksik Değer Yönetimi:** Eksik şehirler, kategoriler ve tanımsız kitap açıklamaları uygun varsayılanlarla dolduruldu.
     5. **Parquet Önbellekleme:** 40 MB'lık Excel veri seti ilk çalıştırmada Parquet formatına dönüştürülerek Streamlit Cloud için 10 kat hızlandırıldı.
     """)
 

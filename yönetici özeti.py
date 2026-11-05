@@ -21,6 +21,16 @@ if __name__ == "__main__":
     )
 
 
+def render_html(html_str: str):
+    """
+    Çok satırlı HTML metinlerindeki girintileri ve boş satırları temizleyerek
+    Markdown'ın (CommonMark) 4+ boşluklu satırları kod bloğu (<pre><code>)
+    olarak yorumlamasını %100 engeller.
+    """
+    cleaned = "\n".join(line.strip() for line in html_str.splitlines() if line.strip())
+    st.markdown(cleaned, unsafe_allow_html=True)
+
+
 # -----------------------------------------------------------------------------
 # 2. VERİ YÜKLEME VE ÖN İŞLEME MOTORU (CACHE DESTEKLİ)
 # -----------------------------------------------------------------------------
@@ -151,62 +161,24 @@ def fmt_int(val: float) -> str:
 
 
 def inject_rafradar_css():
-    st.markdown(
+    render_html(
         """
         <style>
         .stApp {
             background-color: #F8FAFC;
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }
-        /* Üst Başlık ve Filtre Çubuğu */
-        .rafradar-header {
-            background: linear-gradient(135deg, #0F172A 0%, #1E293B 65%, #1D4ED8 100%);
-            color: #FFFFFF;
-            padding: 18px 24px;
-            border-radius: 12px;
-            margin-bottom: 14px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 12px;
-            box-shadow: 0 4px 15px rgba(15, 23, 42, 0.12);
-        }
-        .brand-title {
-            font-size: 22px;
-            font-weight: 800;
-            color: #FFFFFF;
-            letter-spacing: -0.4px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .brand-sub {
-            font-size: 13px;
-            color: #CBD5E1;
-            margin-top: 2px;
-        }
-        .scope-pill {
-            background: rgba(255, 255, 255, 0.14);
-            border: 1px solid rgba(255, 255, 255, 0.25);
-            color: #F8FAFC;
-            padding: 6px 12px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 600;
-        }
         .page-subtitle {
-            font-size: 14px;
+            font-size: 13.5px;
             color: #475569;
             margin-top: -2px;
             margin-bottom: 16px;
             background: #FFFFFF;
-            padding: 10px 16px;
+            padding: 11px 16px;
             border-radius: 8px;
             border: 1px solid #E2E8F0;
             border-left: 4px solid #2563EB;
         }
-
         /* KPI Kartları */
         .kpi-card {
             background: #FFFFFF;
@@ -221,7 +193,6 @@ def inject_rafradar_css():
         .kpi-card.indigo  { border-top-color: #6366F1; }
         .kpi-card.amber   { border-top-color: #F59E0B; }
         .kpi-card.rose    { border-top-color: #EF4444; }
-
         .kpi-label {
             font-size: 11.5px;
             font-weight: 700;
@@ -270,14 +241,13 @@ def inject_rafradar_css():
             margin-left: 6px;
             font-weight: 500;
         }
-
         /* Numaralı Analiz Kartları */
         .section-card {
             background: #FFFFFF;
             border: 1px solid #E2E8F0;
             border-radius: 12px;
-            padding: 20px 22px;
-            margin-bottom: 18px;
+            padding: 18px 20px;
+            margin-bottom: 14px;
             box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
         }
         .section-num {
@@ -296,11 +266,11 @@ def inject_rafradar_css():
             margin-right: 7px;
         }
         .section-takeaway {
-            font-size: 16.5px;
+            font-size: 16px;
             font-weight: 800;
             color: #0F172A;
-            margin-bottom: 12px;
-            line-height: 1.35;
+            margin-bottom: 6px;
+            line-height: 1.38;
         }
         .insight-box {
             background-color: #F8FAFC;
@@ -310,22 +280,24 @@ def inject_rafradar_css():
             border-radius: 0 8px 8px 0;
             font-size: 13px;
             color: #334155;
-            margin-top: 10px;
+            margin-top: 8px;
+            margin-bottom: 16px;
             line-height: 1.5;
         }
-
         /* Sızıntı / Fırsat Mini Kartları */
         .leak-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 10px;
-            margin-top: 10px;
+            margin-top: 6px;
+            margin-bottom: 16px;
         }
         .leak-item {
-            background: #F8FAFC;
+            background: #FFFFFF;
             border: 1px solid #E2E8F0;
             border-radius: 8px;
             padding: 10px 12px;
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.02);
         }
         .leak-item-title {
             font-size: 12px;
@@ -340,14 +312,14 @@ def inject_rafradar_css():
             color: #475569;
             line-height: 1.35;
         }
-
         /* Pareto İkili Yoğunlaşma Kutuları */
         .pareto-box {
-            background: #F8FAFC;
+            background: #FFFFFF;
             border: 1px solid #E2E8F0;
             border-radius: 10px;
             padding: 14px 16px;
-            height: 100%;
+            margin-bottom: 10px;
+            box-shadow: 0 1px 4px rgba(15, 23, 42, 0.03);
         }
         .pareto-title {
             font-size: 13.5px;
@@ -361,7 +333,7 @@ def inject_rafradar_css():
         .pareto-sub {
             font-size: 12px;
             color: #475569;
-            margin-bottom: 10px;
+            margin-bottom: 12px;
         }
         .tier-row {
             margin-bottom: 10px;
@@ -369,14 +341,14 @@ def inject_rafradar_css():
         .tier-header {
             display: flex;
             justify-content: space-between;
-            font-size: 12px;
+            font-size: 11.5px;
             font-weight: 700;
             color: #1E293B;
-            margin-bottom: 3px;
+            margin-bottom: 4px;
         }
         .tier-bar-bg {
             width: 100%;
-            height: 10px;
+            height: 9px;
             background: #E2E8F0;
             border-radius: 999px;
             overflow: hidden;
@@ -385,7 +357,6 @@ def inject_rafradar_css():
             height: 100%;
             border-radius: 999px;
         }
-
         /* Modern 30 Günlük Aksiyon Kartları (Bölüm 4) */
         .action-card {
             background: #FFFFFF;
@@ -393,18 +364,17 @@ def inject_rafradar_css():
             border-left: 5px solid #2563EB;
             border-radius: 10px;
             padding: 14px 16px;
-            margin-bottom: 12px;
+            margin-bottom: 11px;
             box-shadow: 0 1px 4px rgba(15, 23, 42, 0.03);
         }
         .action-card.urgent { border-left-color: #EF4444; background: #FFFDFD; }
         .action-card.high   { border-left-color: #F59E0B; }
         .action-card.medium { border-left-color: #10B981; }
-
         .action-top {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             flex-wrap: wrap;
             gap: 6px;
         }
@@ -441,10 +411,10 @@ def inject_rafradar_css():
             border-radius: 999px;
         }
         .action-headline {
-            font-size: 14.5px;
+            font-size: 14px;
             font-weight: 800;
             color: #0F172A;
-            margin-bottom: 6px;
+            margin-bottom: 5px;
         }
         .action-body {
             font-size: 12.5px;
@@ -457,7 +427,7 @@ def inject_rafradar_css():
             justify-content: space-between;
             align-items: center;
             background: #F8FAFC;
-            padding: 7px 12px;
+            padding: 6px 12px;
             border-radius: 6px;
             border: 1px dashed #CBD5E1;
             font-size: 12px;
@@ -467,15 +437,15 @@ def inject_rafradar_css():
             color: #0F172A;
             font-size: 13px;
         }
-
         /* Veri Kalitesi & Metodoloji Kartları */
         .pipeline-step {
-            background: #F8FAFC;
+            background: #FFFFFF;
             border: 1px solid #E2E8F0;
             border-top: 3px solid #2563EB;
             border-radius: 10px;
             padding: 14px;
             height: 100%;
+            box-shadow: 0 1px 4px rgba(15, 23, 42, 0.03);
         }
         .pipeline-step-num {
             font-size: 11px;
@@ -521,8 +491,7 @@ def inject_rafradar_css():
             font-weight: 600;
         }
         </style>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
@@ -531,7 +500,6 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     Seçilen tarih ve kategori filtresine göre ekrandaki tüm KPI, sızıntı,
     Pareto, RFM, ABC ve anomali metriklerini canlı olarak hesaplar.
     """
-    # 1. Temel Finansal KPI'lar
     net_rev = sales_df["TotalAmount"].sum()
     gross_rev = sales_df["GrossAmount"].sum()
     est_profit = sales_df["EstProfit"].sum()
@@ -548,7 +516,7 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     active_skus = sales_df["Description"].nunique()
     total_invoices = sales_df["InvoiceNo"].nunique()
 
-    # 2. Kategori Medyan İskontosu ve Norm Dışı İskonto Kaçağı (+10 Puan Sapma)
+    # Kategori Medyan İskontosu ve Norm Dışı İskonto Kaçağı (+10 Puan Sapma)
     cat_medians = sales_df.groupby("Category")["DiscountPct"].transform("median")
     excess_disc_pct = sales_df["DiscountPct"] - cat_medians
     leak_mask = excess_disc_pct > 10.0
@@ -556,7 +524,6 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     discount_leak_tl = float(
         (sales_df.loc[leak_mask, "GrossAmount"] * (excess_disc_pct[leak_mask] / 100.0)).sum()
     )
-    # Eğer seçilen dar filtrede +10 puan sapma azsa, +5 puan sapmayı da gösterge olarak hesapla
     if discount_leak_tl < 1000 and len(sales_df) > 0:
         mild_mask = excess_disc_pct > 5.0
         suspicious_orders_count = int(mild_mask.sum())
@@ -564,7 +531,6 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
             (sales_df.loc[mild_mask, "GrossAmount"] * (excess_disc_pct[mild_mask] / 100.0)).sum()
         )
 
-    # Kategori bazlı iskonto anomalisi özeti (Tab 2 ve Tab 1 Aksiyon için)
     cat_anom_df = (
         sales_df.assign(
             CatMedian=cat_medians,
@@ -581,7 +547,7 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
         .sort_values("LeakTL", ascending=False)
     )
 
-    # 3. Müşteri Pareto (80/20) ve RFM / Kayıp Riski Analizi
+    # Müşteri Pareto (80/20) ve RFM / Kayıp Riski Analizi
     max_date_in_selection = sales_df["InvoiceDate"].max()
     cust_df = (
         sales_df.groupby("CustomerID", as_index=False)
@@ -599,13 +565,11 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     cust_df["CumRev"] = cust_df["Revenue"].cumsum()
     cust_df["CumRevPct"] = (cust_df["CumRev"] / net_rev * 100.0) if net_rev > 0 else 0.0
 
-    # Müşteri Pareto katmanları (A: %80 ciro, B: %15 ciro, C: %5 ciro)
     cust_df["Tier"] = np.where(
         cust_df["CumRevPct"] <= 80.0,
         "VIP & Lokomotif Bayiler",
         np.where(cust_df["CumRevPct"] <= 95.0, "Gelişen Orta Bayiler", "Küçük / Tekil Bayiler"),
     )
-    # En az 1 VIP bulunsun
     if not cust_df.empty and (cust_df["Tier"] == "VIP & Lokomotif Bayiler").sum() == 0:
         cust_df.loc[0, "Tier"] = "VIP & Lokomotif Bayiler"
 
@@ -613,7 +577,6 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     vip_cust_share_pct = (vip_cust_count / max(1, active_customers)) * 100.0
     top10_cust_rev_share = (cust_df.head(10)["Revenue"].sum() / net_rev * 100.0) if net_rev > 0 else 0.0
 
-    # Pasif / Kayıp Riskli VIP & Üst Segment Bayiler (Son 45+ gündür sipariş vermeyen üst %35 ciro bayileri)
     recency_threshold = max(30, int((sales_df["InvoiceDate"].max() - sales_df["InvoiceDate"].min()).days * 0.25))
     recency_threshold = min(recency_threshold, 90)
     top_half_cutoff = cust_df["Revenue"].quantile(0.65) if len(cust_df) > 3 else 0
@@ -622,18 +585,15 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
         at_risk_vips = cust_df.sort_values("RecencyDays", ascending=False).head(max(1, len(cust_df) // 10)).copy()
 
     at_risk_vip_count = len(at_risk_vips)
-    # Riskteki VIP bayilerin geri kazanılabilir dönemlik potansiyeli (~%35'i)
     vip_recovery_potential_tl = float(at_risk_vips["Revenue"].sum() * 0.35)
     top_risk_examples = at_risk_vips.sort_values("Revenue", ascending=False).head(2)
 
-    # Tek sipariş verip bırakan (Yeni müşteri kaybı) bayiler
     one_time_custs = cust_df[cust_df["Orders"] == 1]
     one_time_ratio_pct = (len(one_time_custs) / max(1, active_customers)) * 100.0
     avg_second_order_val = (net_rev / max(1, total_invoices)) * 1.15
-    # Tek siparişli bayilerin %25'ine 2. sipariş yaptırılırsa kazanılacak ciro
     retention_potential_tl = float(len(one_time_custs) * 0.25 * avg_second_order_val)
 
-    # 4. Ürün (SKU) ABC Analizi ve Ölü Stok Tespiti
+    # Ürün (SKU) ABC Analizi ve Ölü Stok Tespiti
     sku_df = (
         sales_df.groupby(["Description", "Category"], as_index=False)
         .agg(
@@ -659,11 +619,9 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     c_sku_count = int((sku_df["ABC"] == "C Sınıfı & Uzun Kuyruk").sum())
     c_sku_share_pct = (c_sku_count / max(1, active_skus)) * 100.0
 
-    # Ölü Stok: Seçilen dönemin son tarihinden geriye 120+ gündür satılmayan SKU sayısı
     sku_df["DaysSinceSale"] = (max_date_in_selection - sku_df["LastSale"]).dt.days
     dead_sku_count = int((sku_df["DaysSinceSale"] >= 120).sum())
 
-    # A Sınıfı yıldız ürünlerde stoksuzluk (yok satma) önleme potansiyeli (A sınıfı cironun %4,5'i)
     a_class_rev = float(sku_df.loc[sku_df["ABC"] == "A Sınıfı Yıldız Kitaplar", "Revenue"].sum())
     stockout_prevention_tl = a_class_rev * 0.045
 
@@ -708,13 +666,11 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
 def render_executive_summary(filtered_df=None, raw_df=None):
     inject_rafradar_css()
 
-    # Ham veriyi yükle
     full_raw_df = raw_df if (raw_df is not None and not raw_df.empty) else load_rafradar_data()
     if full_raw_df.empty:
         st.error("Veri seti bulunamadı! Lütfen 'B2B_Transaction_Data_.parquet' dosyasını kontrol edin.")
         return
 
-    # Sütunların tam olduğundan emin ol (streamlit_app.py'den gelirse eksik sütunları tamamla)
     if "DiscountPct" not in full_raw_df.columns or "EstProfit" not in full_raw_df.columns:
         full_raw_df = load_rafradar_data()
 
@@ -726,13 +682,16 @@ def render_executive_summary(filtered_df=None, raw_df=None):
     # -------------------------------------------------------------------------
     # ÜST NAVİGASYON VE DİNAMİK FİLTRE ÇUBUĞU (TARİH & KATEGORİ BAĞIMLI)
     # -------------------------------------------------------------------------
-    top_c1, top_c2, top_c3, top_c4, top_c5 = st.columns([2.1, 2.6, 1.9, 2.0, 1.8])
+    top_c1, top_c2, top_c3, top_c4, top_c5 = st.columns([2.0, 2.7, 1.9, 2.0, 1.8])
 
     with top_c1:
-        st.markdown(
-            "<div style='padding-top:4px;'><span style='font-size:22px; font-weight:900; color:#0F172A;'>📊 RafRadar</span><br>"
-            "<span style='font-size:11.5px; color:#64748B; font-weight:600;'>C-Level Karar Destek Sistemi</span></div>",
-            unsafe_allow_html=True,
+        render_html(
+            """
+            <div style='padding-top:4px;'>
+                <span style='font-size:22px; font-weight:900; color:#0F172A;'>📊 RafRadar</span><br>
+                <span style='font-size:11.5px; color:#64748B; font-weight:600;'>C-Level Karar Destek Sistemi</span>
+            </div>
+            """
         )
 
     with top_c2:
@@ -750,7 +709,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         )
         selected_preset = st.selectbox("📅 Analiz Dönemi", period_options, index=0, key="rafradar_preset")
 
-    # Preset'e göre varsayılan başlangıç/bitiş tarihi hesapla
     max_dt_ts = pd.to_datetime(global_max_date)
     if selected_preset == "Tüm Veri Seti":
         def_start, def_end = global_min_date, global_max_date
@@ -799,7 +757,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             key="rafradar_cat",
         )
 
-    # Filtreleri Veriye Uygula
     scope_sales_df = valid_all_df[
         (valid_all_df["Date"] >= start_date) & (valid_all_df["Date"] <= end_date)
     ].copy()
@@ -819,7 +776,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         st.warning("Seçilen tarih aralığı ve kategori için satış kaydı bulunamadı. Lütfen tarih aralığını genişletin.")
         return
 
-    # Karşılaştırma (Önceki Eşdeğer Dönem) Verisini Oluştur
     span_days = max(1, (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days)
     prev_end = (pd.to_datetime(start_date) - pd.Timedelta(days=1)).date()
     prev_start = (pd.to_datetime(prev_end) - pd.Timedelta(days=span_days)).date()
@@ -830,13 +786,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
     if selected_cat != "Tüm Kategoriler":
         prev_sales_df = prev_sales_df[prev_sales_df["Category"] == selected_cat]
 
-    # Eğer tüm veri seti seçiliyse (önceki dönem boşsa), seçilen dönemin ilk yarısı ile ikinci yarısını kıyasla
     if prev_sales_df.empty and len(scope_sales_df) > 10:
         mid_ts = scope_sales_df["InvoiceDate"].min() + (scope_sales_df["InvoiceDate"].max() - scope_sales_df["InvoiceDate"].min()) / 2
         prev_sales_df = scope_sales_df[scope_sales_df["InvoiceDate"] < mid_ts].copy()
         curr_half_df = scope_sales_df[scope_sales_df["InvoiceDate"] >= mid_ts].copy()
         m = compute_dynamic_metrics(scope_sales_df, prev_sales_df, scope_raw_df)
-        # Büyüme oranını ikinci yarı vs ilk yarı olarak güncelle
         first_half_rev = prev_sales_df["TotalAmount"].sum()
         second_half_rev = curr_half_df["TotalAmount"].sum()
         m["rev_growth_pct"] = ((second_half_rev - first_half_rev) / first_half_rev * 100.0) if first_half_rev > 0 else 0.0
@@ -853,15 +807,14 @@ def render_executive_summary(filtered_df=None, raw_df=None):
     # SEKME 1: YÖNETİCİ ÖZETİ (EXECUTIVE SUMMARY)
     # =========================================================================
     if selected_tab == "🏛️ Yönetici Özeti":
-        st.markdown(
+        render_html(
             f"""
             <div class='page-subtitle'>
                 <b>🎯 Yönetici Sorusu:</b> Şirket büyüyor mu, kâr marjımız güvende mi ve bu hafta hangi kritik kararları almalıyız?
                 &nbsp;|&nbsp; <b>Aktif Filtre:</b> <code>{start_str} – {end_str}</code> • <b>Kategori:</b> <code>{selected_cat}</code>
                 • <b>İşlem Sayısı:</b> <code>{fmt_int(len(scope_sales_df))} satır</code> ({comparison_label})
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
         # ---------------------------------------------------------------------
@@ -873,7 +826,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         rev_arrow = "▲" if m["rev_growth_pct"] >= 0 else "▼"
 
         with k1:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card">
                     <div class="kpi-label">Seçili Dönem Net Ciro</div>
@@ -881,13 +834,12 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="{rev_delta_cls}">{rev_arrow} %{abs(m['rev_growth_pct']):.1f}</span>
                     <span class="kpi-subtext">{fmt_int(m['total_invoices'])} fatura</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with k2:
             margin_cls = "kpi-delta-pos" if m["profit_margin"] >= 28.0 else "kpi-delta-warn"
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card emerald">
                     <div class="kpi-label">Tahmini Brüt Kâr & Marj</div>
@@ -895,14 +847,13 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="{margin_cls}">%{m['profit_margin']:.1f} Marj</span>
                     <span class="kpi-subtext">Maliyet: Liste %44'ü</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with k3:
             cust_sign = "+" if m["cust_diff"] >= 0 else ""
             cust_cls = "kpi-delta-pos" if m["cust_diff"] >= 0 else "kpi-delta-warn"
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card indigo">
                     <div class="kpi-label">Aktif B2B Bayi & Pareto</div>
@@ -910,12 +861,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="{cust_cls}">{cust_sign}{m['cust_diff']} bayi</span>
                     <span class="kpi-subtext">%{m['vip_cust_share_pct']:.0f}'i = %80 Ciro</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with k4:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card amber">
                     <div class="kpi-label">Ort. İskonto & Norm Dışı Kaçak</div>
@@ -923,12 +873,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="kpi-delta-neg">{fmt_tl(m['discount_leak_tl'], 1)} kaçak</span>
                     <span class="kpi-subtext">{fmt_int(m['suspicious_orders_count'])} sapmalı satır</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with k5:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card rose">
                     <div class="kpi-label">Aktif Kitap (SKU) & Hareketsiz</div>
@@ -936,8 +885,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="kpi-delta-neg">{fmt_int(m['dead_sku_count'])} Hareketsiz</span>
                     <span class="kpi-subtext">120+ gün satışsız</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         st.write("")
@@ -950,7 +898,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         col_left, col_right = st.columns([5.6, 4.4])
 
         with col_left:
-            # Zaman serisi çözünürlüğünü seçilen tarih aralığına göre otomatik belirle
             if span_days <= 62:
                 ts_df = (
                     scope_sales_df.groupby("Date", as_index=False)
@@ -974,16 +921,14 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 0.0,
             )
 
-            # En yüksek %30'luk ciro dönemlerini koyu mavi ile vurgula
             rev_thresh = ts_df["NetRev"].quantile(0.68) if len(ts_df) > 3 else ts_df["NetRev"].mean()
             bar_colors = ["#2563EB" if v >= rev_thresh else "#CBD5E1" for v in ts_df["NetRev"]]
 
             peak_row = ts_df.loc[ts_df["NetRev"].idxmax()]
             low_row = ts_df.loc[ts_df["NetRev"].idxmin()]
-            peak_to_low_ratio = (peak_row["NetRev"] / max(1.0, low_row["NetRev"]))
+            peak_to_low_ratio = peak_row["NetRev"] / max(1.0, low_row["NetRev"])
             peak_disc_avg = ts_df.loc[ts_df["NetRev"] >= rev_thresh, "DiscPct"].mean()
 
-            # En yoğun sipariş günü
             dow_map = {
                 "Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba",
                 "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"
@@ -993,7 +938,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             top_dow_tr = dow_map.get(top_dow_en, top_dow_en)
             top_dow_share = (dow_rev.max() / m["net_rev"] * 100.0) if m["net_rev"] > 0 else 0.0
 
-            st.markdown(
+            render_html(
                 f"""
                 <div class="section-card">
                     <div class="section-num"><span>1</span> FİNANSAL PERFORMANS VE İSKONTO DİSİPLİNİ</div>
@@ -1001,8 +946,8 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         Zirve dönem ({peak_row['Label']}) ile en düşük dönem arasında {peak_to_low_ratio:.1f} kat ciro farkı var;
                         ancak talebin en yüksek olduğu {period_unit_name} bile ortalama iskonto (%{peak_disc_avg:.1f}) düşmüyor.
                     </div>
-                """,
-                unsafe_allow_html=True,
+                </div>
+                """
             )
 
             fig1 = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1033,8 +978,8 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             disc_min = max(0, float(ts_df["DiscPct"].min()) - 8)
             disc_max = min(85, float(ts_df["DiscPct"].max()) + 8)
             fig1.update_layout(
-                height=295,
-                margin=dict(l=10, r=10, t=20, b=10),
+                height=290,
+                margin=dict(l=10, r=10, t=18, b=10),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -1054,20 +999,17 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
             st.plotly_chart(fig1, use_container_width=True)
 
-            st.markdown(
+            render_html(
                 f"""
-                    <div class="insight-box">
-                        <b>💡 Yönetici Çıkarımı:</b> Mavi çubuklarla vurgulanan yüksek talep dönemlerinde müşteriler zaten organik olarak
-                        sipariş verirken iskontonun <b>%{peak_disc_avg:.1f}</b> seviyesinde sabit tutulması kâr marjını aşındırıyor.
-                        Ayrıca haftalık sevkiyatların <b>%{top_dow_share:.1f}'i {top_dow_tr}</b> gününe yığılarak depoda darboğaz yaratıyor.
-                    </div>
+                <div class="insight-box">
+                    <b>💡 Yönetici Çıkarımı:</b> Mavi çubuklarla vurgulanan yüksek talep dönemlerinde müşteriler zaten organik olarak
+                    sipariş verirken iskontonun <b>%{peak_disc_avg:.1f}</b> seviyesinde sabit tutulması kâr marjını aşındırıyor.
+                    Ayrıca haftalık sevkiyatların <b>%{top_dow_share:.1f}'i {top_dow_tr}</b> gününe yığılarak depoda darboğaz yaratıyor.
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with col_right:
-            # [2] YENİ YAKLAŞIM: MEVCUT CİRODAN HEDEF CİROYA ŞELALE KÖPRÜSÜ (WATERFALL)
             total_opportunity_tl = (
                 m["vip_recovery_potential_tl"]
                 + m["stockout_prevention_tl"]
@@ -1077,7 +1019,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             target_rev_tl = m["net_rev"] + total_opportunity_tl
             uplift_pct = (total_opportunity_tl / m["net_rev"] * 100.0) if m["net_rev"] > 0 else 0.0
 
-            st.markdown(
+            render_html(
                 f"""
                 <div class="section-card">
                     <div class="section-num"><span>2</span> CİRO VE KÂR SIZINTISI KÖPRÜSÜ (FIRSAT ANALİZİ)</div>
@@ -1085,8 +1027,8 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         4 operasyonel sızıntı kapatıldığında, mevcut ciroya +{fmt_tl(total_opportunity_tl)}
                         (+%{uplift_pct:.1f}) eklenerek {fmt_tl(target_rev_tl)} seviyesine ulaşılabilir.
                     </div>
-                """,
-                unsafe_allow_html=True,
+                </div>
+                """
             )
 
             wf_x = [
@@ -1130,7 +1072,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
             fig2.update_layout(
                 height=245,
-                margin=dict(l=10, r=10, t=22, b=10),
+                margin=dict(l=10, r=10, t=20, b=10),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 yaxis=dict(
@@ -1142,42 +1084,39 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-            # Şelale adımlarını tek bakışta anlatan 4 mini kutu
-            st.markdown(
+            render_html(
                 f"""
-                    <div class="leak-grid">
-                        <div class="leak-item">
-                            <div class="leak-item-title">
-                                <span>🔴 1. Pasif VIP Bayiler</span>
-                                <span style="color:#059669;">+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</span>
-                            </div>
-                            <div class="leak-item-desc">Siparişi kesen <b>{m['at_risk_vip_count']} büyük bayinin</b> geri kazanım etkisi.</div>
+                <div class="leak-grid">
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>🔴 1. Pasif VIP Bayiler</span>
+                            <span style="color:#059669;">+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item">
-                            <div class="leak-item-title">
-                                <span>📦 2. Yıldız Ürün Stoğu</span>
-                                <span style="color:#059669;">+{fmt_tl(m['stockout_prevention_tl'], 1)}</span>
-                            </div>
-                            <div class="leak-item-desc">Cironun %80'ini çeken <b>{m['a_sku_count']} A sınıfı kitapta</b> yok satmayı önleme.</div>
+                        <div class="leak-item-desc">Siparişi kesen <b>{m['at_risk_vip_count']} büyük bayinin</b> geri kazanım etkisi.</div>
+                    </div>
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>📦 2. Yıldız Ürün Stoğu</span>
+                            <span style="color:#059669;">+{fmt_tl(m['stockout_prevention_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item">
-                            <div class="leak-item-title">
-                                <span>🔄 3. Tek Siparişli Bayiler</span>
-                                <span style="color:#059669;">+{fmt_tl(m['retention_potential_tl'], 1)}</span>
-                            </div>
-                            <div class="leak-item-desc">Tek alımda kalan <b>%{m['one_time_ratio_pct']:.0f} bayinin</b> çeyreğine 2. sipariş yaptırma.</div>
+                        <div class="leak-item-desc">Cironun %80'ini çeken <b>{m['a_sku_count']} A sınıfı kitapta</b> yok satmayı önleme.</div>
+                    </div>
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>🔄 3. Tek Siparişli Bayiler</span>
+                            <span style="color:#059669;">+{fmt_tl(m['retention_potential_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item">
-                            <div class="leak-item-title">
-                                <span>🏷️ 4. Aşırı İskonto Tavanı</span>
-                                <span style="color:#059669;">+{fmt_tl(m['discount_leak_tl'], 1)}</span>
-                            </div>
-                            <div class="leak-item-desc">Kategori normunu aşan <b>{fmt_int(m['suspicious_orders_count'])} satırdaki</b> fazladan indirimi kesme.</div>
+                        <div class="leak-item-desc">Tek alımda kalan <b>%{m['one_time_ratio_pct']:.0f} bayinin</b> çeyreğine 2. sipariş yaptırma.</div>
+                    </div>
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>🏷️ 4. Aşırı İskonto Tavanı</span>
+                            <span style="color:#059669;">+{fmt_tl(m['discount_leak_tl'], 1)}</span>
                         </div>
+                        <div class="leak-item-desc">Kategori normunu aşan <b>{fmt_int(m['suspicious_orders_count'])} satırdaki</b> fazladan indirimi kesme.</div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         # ---------------------------------------------------------------------
@@ -1191,17 +1130,15 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             cust_df = m["cust_df"]
             sku_df = m["sku_df"]
 
-            # Müşteri katman oranları
             b_cust_count = int((cust_df["Tier"] == "Gelişen Orta Bayiler").sum())
             c_cust_count = int((cust_df["Tier"] == "Küçük / Tekil Bayiler").sum())
             b_cust_share = (b_cust_count / max(1, m["active_customers"])) * 100.0
             c_cust_share = (c_cust_count / max(1, m["active_customers"])) * 100.0
 
-            # Ürün katman oranları
             b_sku_count = int((sku_df["ABC"] == "B Sınıfı Düzenli Kitaplar").sum())
             b_sku_share = (b_sku_count / max(1, m["active_skus"])) * 100.0
 
-            st.markdown(
+            render_html(
                 f"""
                 <div class="section-card">
                     <div class="section-num"><span>3</span> ÇİFT TARAFLI BAĞIMLILIK RİSKİ (PARETO 80/20 ANALİZİ)</div>
@@ -1209,13 +1146,13 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         Cironun %80'i müşterilerin sadece %{m['vip_cust_share_pct']:.1f}'ine ({m['vip_cust_count']} bayi)
                         ve kitapların %{m['a_sku_share_pct']:.1f}'ine ({fmt_int(m['a_sku_count'])} SKU) bağımlı.
                     </div>
-                """,
-                unsafe_allow_html=True,
+                </div>
+                """
             )
 
             p_col1, p_col2 = st.columns(2)
             with p_col1:
-                st.markdown(
+                render_html(
                     f"""
                     <div class="pareto-box">
                         <div class="pareto-title">
@@ -1223,7 +1160,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <span style="font-size:11px; background:#DBEAFE; color:#1E3A8A; padding:2px 7px; border-radius:99px;">{fmt_int(m['active_customers'])} Bayi</span>
                         </div>
                         <div class="pareto-sub">İlk 10 bayi tek başına cironun <b>%{m['top10_cust_rev_share']:.1f}</b>'ini üretiyor.</div>
-
                         <div class="tier-row">
                             <div class="tier-header">
                                 <span>🏆 VIP Bayiler ({m['vip_cust_count']} bayi | %{m['vip_cust_share_pct']:.0f})</span>
@@ -1231,7 +1167,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             </div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:80%; background:#2563EB;"></div></div>
                         </div>
-
                         <div class="tier-row">
                             <div class="tier-header">
                                 <span>🤝 Orta Segment ({b_cust_count} bayi | %{b_cust_share:.0f})</span>
@@ -1239,7 +1174,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             </div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:15%; background:#0D9488;"></div></div>
                         </div>
-
                         <div class="tier-row" style="margin-bottom:0;">
                             <div class="tier-header">
                                 <span>🌱 Küçük Alıcılar ({c_cust_count} bayi | %{c_cust_share:.0f})</span>
@@ -1248,12 +1182,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:5%; background:#94A3B8;"></div></div>
                         </div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
+                    """
                 )
 
             with p_col2:
-                st.markdown(
+                render_html(
                     f"""
                     <div class="pareto-box">
                         <div class="pareto-title">
@@ -1261,7 +1194,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <span style="font-size:11px; background:#DCFCE7; color:#166534; padding:2px 7px; border-radius:99px;">{fmt_int(m['active_skus'])} Kitap</span>
                         </div>
                         <div class="pareto-sub">Kitapların <b>%{m['c_sku_share_pct']:.0f}'i</b> cironun sadece %5'ini getiriyor.</div>
-
                         <div class="tier-row">
                             <div class="tier-header">
                                 <span>⭐ A Sınıfı Yıldız ({fmt_int(m['a_sku_count'])} SKU | %{m['a_sku_share_pct']:.0f})</span>
@@ -1269,7 +1201,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             </div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:80%; background:#10B981;"></div></div>
                         </div>
-
                         <div class="tier-row">
                             <div class="tier-header">
                                 <span>📘 B Sınıfı Düzenli ({fmt_int(b_sku_count)} SKU | %{b_sku_share:.0f})</span>
@@ -1277,7 +1208,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             </div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:15%; background:#3B82F6;"></div></div>
                         </div>
-
                         <div class="tier-row" style="margin-bottom:0;">
                             <div class="tier-header">
                                 <span>📦 C Sınıfı & Pasif ({fmt_int(m['c_sku_count'])} SKU | %{m['c_sku_share_pct']:.0f})</span>
@@ -1286,11 +1216,9 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:5%; background:#94A3B8;"></div></div>
                         </div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
+                    """
                 )
 
-            # Görsel karşılaştırma grafiği: Müşteri % vs Ciro % ve Ürün % vs Ciro %
             pareto_comp_df = pd.DataFrame(
                 {
                     "Grup": ["VIP Bayiler", "A Sınıfı Kitaplar", "C Sınıfı Kitaplar"],
@@ -1325,7 +1253,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
             fig3.update_layout(
                 barmode="group",
-                height=195,
+                height=210,
                 margin=dict(l=10, r=10, t=24, b=5),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
@@ -1333,10 +1261,8 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 yaxis=dict(range=[0, 105], gridcolor="#F1F5F9", title="Pay (%)"),
             )
             st.plotly_chart(fig3, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
 
         with col_b2:
-            # Dinamik örnek müşteri ve kategori bilgilerini hazırla
             risk_ex = m["top_risk_examples"]
             if len(risk_ex) >= 2:
                 vip_str = (
@@ -1355,21 +1281,19 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             top_anom_cats = m["cat_anom_df"].head(2)["Category"].tolist()
             anom_cat_str = " ve ".join(top_anom_cats) if top_anom_cats else "Sözlük ve Roman"
 
-            st.markdown(
+            render_html(
                 f"""
                 <div class="section-card">
                     <div class="section-num"><span>4</span> YÖNETİM KURULU 30 GÜNLÜK AKSİYON PLANI</div>
                     <div class="section-takeaway">
                         Seçilen dönem verilerinden otomatik süzülen, en hızlı nakit ve kâr etkisi yaratacak 4 somut yönetim kararı:
                     </div>
-
-                    <!-- AKSİYON 1: PAZARLAMA -->
                     <div class="action-card urgent">
                         <div class="action-top">
                             <span class="action-dept">🎯 1. Pazarlama & VIP Bayi İlişkileri</span>
                             <span class="action-priority-urgent">🔴 ACİL • Bu Hafta</span>
                         </div>
-                        <div class="action-headline">Siparişi Kesen Büyük Bayiler İçin birebir "Geri Kazanım" Aramaları</div>
+                        <div class="action-headline">Siparişi Kesen Büyük Bayiler İçin Birebir "Geri Kazanım" Aramaları</div>
                         <div class="action-body">
                             <b>Tespit Edilen Sorun:</b> {vip_str}<br>
                             <b>Yapılacak Aksiyon:</b> Satış temsilcileri bu hafta pasif VIP bayileri doğrudan arayarak özel vade veya kademeli sepet hedefi tanımlamalı.
@@ -1379,8 +1303,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <span class="action-impact" style="color:#DC2626;">+{fmt_tl(m['vip_recovery_potential_tl'])} Potansiyel Ciro</span>
                         </div>
                     </div>
-
-                    <!-- AKSİYON 2: SATIŞ & FİYATLAMA -->
                     <div class="action-card urgent">
                         <div class="action-top">
                             <span class="action-dept">💰 2. Satış & Fiyatlama Disiplini</span>
@@ -1396,8 +1318,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <span class="action-impact" style="color:#D97706;">+{fmt_tl(m['discount_leak_tl'])} Doğrudan Kâr Koruma</span>
                         </div>
                     </div>
-
-                    <!-- AKSİYON 3: TEDARİK ZİNCİRİ -->
                     <div class="action-card high">
                         <div class="action-top">
                             <span class="action-dept">📦 3. Tedarik Zinciri & Stok Yönetimi</span>
@@ -1413,8 +1333,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <span class="action-impact" style="color:#2563EB;">+{fmt_tl(m['stockout_prevention_tl'])} Ciro + Nakit Çözülümü</span>
                         </div>
                     </div>
-
-                    <!-- AKSİYON 4: CRM & MÜŞTERİ GELİŞTİRME -->
                     <div class="action-card medium" style="margin-bottom:0;">
                         <div class="action-top">
                             <span class="action-dept">🤝 4. CRM & Yeni Bayi Tutundurma</span>
@@ -1431,8 +1349,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         </div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
     # =========================================================================
@@ -1445,24 +1362,20 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         clean_ratio_pct = (clean_rows / max(1, total_raw_rows)) * 100.0
         return_amount_tl = abs(float(scope_raw_df.loc[scope_raw_df["IsReturn"], "TotalAmount"].sum()))
 
-        st.markdown(
+        render_html(
             f"""
             <div class='page-subtitle'>
                 <b>🔬 Veri Ön İşleme ve Metodoloji Rehberi:</b> Ham B2B Excel verisinden nasıl anlamlı iş sonuçları ürettik,
                 veriyi nasıl temizledik ve ekrandaki her bir metriği hangi formülle hesapladık?
                 &nbsp;|&nbsp; <b>İncelenen Dönem:</b> <code>{start_str} – {end_str}</code>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
-        # ---------------------------------------------------------------------
-        # ÜST KPI KARTLARI (CANLI VERİ KALİTESİ ÖZETİ)
-        # ---------------------------------------------------------------------
         dq1, dq2, dq3, dq4 = st.columns(4)
 
         with dq1:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card">
                     <div class="kpi-label">Ham İşlem & Net Satış Kaydı</div>
@@ -1470,12 +1383,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="kpi-delta-pos">%{clean_ratio_pct:.1f} Net Satış</span>
                     <span class="kpi-subtext">Toplam Ham: {fmt_int(total_raw_rows)} satır</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with dq2:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card rose">
                     <div class="kpi-label">Ayrıştırılan İptal / İade</div>
@@ -1483,12 +1395,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="kpi-delta-neg">{fmt_tl(return_amount_tl, 1)} İade</span>
                     <span class="kpi-subtext">'C' kodlu & negatif miktarlı</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with dq3:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="kpi-card amber">
                     <div class="kpi-label">Norm Dışı İskonto Anomalisi</div>
@@ -1496,12 +1407,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="kpi-delta-warn">{fmt_tl(m['discount_leak_tl'], 1)} Sapma</span>
                     <span class="kpi-subtext">Kategori medyanı üstü</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with dq4:
-            st.markdown(
+            render_html(
                 """
                 <div class="kpi-card emerald">
                     <div class="kpi-label">Veri Zenginleştirme & Modeller</div>
@@ -1509,16 +1419,12 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     <span class="kpi-delta-pos">+12 Yeni Değişken</span>
                     <span class="kpi-subtext">RFM, ABC, Marj & Kaçak</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         st.write("")
 
-        # ---------------------------------------------------------------------
-        # BÖLÜM 1: 5 ADIMLI VERİ ÖN İŞLEME HUNİSİ (DATA PIPELINE STORYTELLING)
-        # ---------------------------------------------------------------------
-        st.markdown(
+        render_html(
             """
             <div class="section-card">
                 <div class="section-num"><span>1</span> HAM VERİDEN KARAR DESTEK SİSTEMİNE: 5 ADIMLI VERİ ÖN İŞLEME HUNİSİ</div>
@@ -1526,27 +1432,26 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     40 MB büyüklüğündeki ham B2B kitap dağıtım verisi, 5 aşamalı otomatik temizleme ve değişken türetme
                     hattından geçirilerek yönetici kararlarına hazır hale getirilmiştir.
                 </div>
-            """,
-            unsafe_allow_html=True,
+            </div>
+            """
         )
 
         s1, s2, s3, s4, s5 = st.columns(5)
         with s1:
-            st.markdown(
+            render_html(
                 """
                 <div class="pipeline-step">
                     <div class="pipeline-step-num">ADIM 1 • PERFORMANS</div>
                     <div class="pipeline-step-title">⚡ Parquet Dönüşümü & Önbellekleme</div>
                     <div class="pipeline-step-desc">
-                        40 MB'lık yavaş Excel (`xlsx`) dosyası 14 MB'lık <b>Apache Parquet</b> sütunsal formatına çevrilip
+                        40 MB'lık yavaş Excel (<code>xlsx</code>) dosyası 14 MB'lık <b>Apache Parquet</b> sütunsal formatına çevrilip
                         <code>@st.cache_data</code> ile belleğe alındı. Okuma süresi <b>18 saniyeden 0,4 saniyeye</b> indirildi.
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         with s2:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="pipeline-step">
                     <div class="pipeline-step-num">ADIM 2 • TEMİZLİK</div>
@@ -1556,11 +1461,10 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         <b>{fmt_int(return_rows)} satır</b> net satış ciro hesaplarını şişirmemesi için <code>IsReturn</code> olarak ayrıştırıldı.
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         with s3:
-            st.markdown(
+            render_html(
                 """
                 <div class="pipeline-step">
                     <div class="pipeline-step-num">ADIM 3 • FİNANSAL TÜRETİM</div>
@@ -1570,11 +1474,10 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         her satırın <b>Brüt Tutarı, Net Cirosu, İskonto Oranı (%) ve Tahmini Brüt Kârı</b> türetildi.
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         with s4:
-            st.markdown(
+            render_html(
                 """
                 <div class="pipeline-step">
                     <div class="pipeline-step-num">ADIM 4 • SEGMENTASYON</div>
@@ -1584,11 +1487,10 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         kitaplar ise kümülatif ciro payına göre <b>A (%80), B (%15), C (%5)</b> olarak sınıflandırıldı.
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         with s5:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="pipeline-step">
                     <div class="pipeline-step-num">ADIM 5 • ANOMALİ DENETİMİ</div>
@@ -1598,25 +1500,20 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         <b>{fmt_int(m['suspicious_orders_count'])} işlem satırı</b> otomatik olarak işaretlendi.
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
-        st.markdown("</div>", unsafe_allow_html=True)
 
-        # ---------------------------------------------------------------------
-        # BÖLÜM 2: METRİKLER NASIL HESAPLANDI? (FORMÜL REHBERİ) & GERÇEK ANOMALİ GRAFİĞİ
-        # ---------------------------------------------------------------------
+        st.write("")
         col_f1, col_f2 = st.columns([5.5, 4.5])
 
         with col_f1:
-            st.markdown(
+            render_html(
                 """
                 <div class="section-card">
                     <div class="section-num"><span>2</span> EKRANDAKİ METRİKLER NASIL HESAPLANDI? (ANALİTİK FORMÜL REHBERİ)</div>
                     <div class="section-takeaway">
                         Yönetici özetindeki tüm göstergeler, ham veri sütunlarından aşağıdaki matematiksel kurallarla canlı hesaplanır:
                     </div>
-
                     <div class="formula-card">
                         <div class="formula-title">1. Brüt Ciro, Net Ciro ve Gerçekleşen İskonto Oranı (%)</div>
                         <div class="formula-code">Brüt Ciro = Quantity × UnitPrice &nbsp;|&nbsp; Net Ciro = Quantity × NetPrice</div>
@@ -1625,7 +1522,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <b>İskonto (%) = ((Brüt Ciro - Net Ciro) / Brüt Ciro) × 100</b>.
                         </div>
                     </div>
-
                     <div class="formula-card">
                         <div class="formula-title">2. Tahmini Brüt Kâr ve Marj Hesabı (Alış Maliyeti Varsayımı)</div>
                         <div class="formula-code">Tahmini Maliyet = 0,44 × Liste Tutarı &nbsp;|&nbsp; Brüt Kâr = Net Ciro - Tahmini Maliyet</div>
@@ -1634,7 +1530,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             <b>Liste Fiyatının %44'ü (%56 dağıtımcı alış iskontosu)</b> maliyet kabul edilmiştir.
                         </div>
                     </div>
-
                     <div class="formula-card">
                         <div class="formula-title">3. Norm Dışı İskonto Kaçağı (Fiyat Anomalisi Tespiti)</div>
                         <div class="formula-code">Kaçak TL = Brüt Tutar × (Satır İskontosu % - Kategori Medyan İskontosu %)</div>
@@ -1643,7 +1538,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                             üzerinde indirim verilen siparişlerde fazladan vazgeçilen tutar "İskonto Kaçağı" olarak raporlanır.
                         </div>
                     </div>
-
                     <div class="formula-card" style="margin-bottom:0;">
                         <div class="formula-title">4. Çift Taraflı Pareto (80/20), Kayıp Riski ve Emniyet Stoğu</div>
                         <div class="formula-code">Kümülatif Ciro Payı ≤ %80 → A Sınıfı (VIP Bayi / Yıldız Kitap)</div>
@@ -1653,20 +1547,19 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                         </div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with col_f2:
-            st.markdown(
+            render_html(
                 """
                 <div class="section-card">
                     <div class="section-num"><span>3</span> KATEGORİ BAZLI İSKONTO SAPMALARI VE KAÇAK TUTARI (CANLI VERİ)</div>
                     <div class="section-takeaway">
                         Seçilen dönemde kategori medyan iskontosunun aşılması nedeniyle en çok gelir sızıntısı yaşanan ürün grupları:
                     </div>
-                """,
-                unsafe_allow_html=True,
+                </div>
+                """
             )
 
             top_anom_df = m["cat_anom_df"].head(7).copy()
@@ -1702,21 +1595,16 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             else:
                 st.info("Seçilen dar filtrede belirgin bir kategori iskonto sapması bulunmadı.")
 
-            st.markdown(
+            render_html(
                 """
-                    <div class="insight-box">
-                        <b>📌 Neden Medyan (Ortanca) Kullanıyoruz?</b> Aritmetik ortalama, aşırı indirimli birkaç büyük faturadan
-                        etkilenerek bozulur. <b>Kategori Medyanı</b> ise o kategorinin gerçek piyasa normunu temsil eder;
-                        böylece standart dışı indirim verilen faturalar net biçimde yakalanır.
-                    </div>
+                <div class="insight-box">
+                    <b>📌 Neden Medyan (Ortanca) Kullanıyoruz?</b> Aritmetik ortalama, aşırı indirimli birkaç büyük faturadan
+                    etkilenerek bozulur. <b>Kategori Medyanı</b> ise o kategorinin gerçek piyasa normunu temsil eder;
+                    böylece standart dışı indirim verilen faturalar net biçimde yakalanır.
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
-        # ---------------------------------------------------------------------
-        # BÖLÜM 3: TÜRETİLMİŞ VERİ SETİ CANLI ÖNİZLEME VE CSV İNDİRME
-        # ---------------------------------------------------------------------
         with st.expander("🔍 İşlenmiş ve Zenginleştirilmiş Veri Seti Örneğini İncele (İlk 25 Satır)"):
             preview_cols = [
                 "InvoiceNo", "CustomerID", "InvoiceDate", "Category", "Description",

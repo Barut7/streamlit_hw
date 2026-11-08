@@ -1259,8 +1259,7 @@ def render_department_header_and_kpis(
 
 
 # -----------------------------------------------------------------------------
-# 7. YÖNETİCİ ÖZETİ & VERİ KALİTESİ (İLK TASARIM + RAFRADAR V2 BİRLEŞİMİ)
-#    (Eski 3. kısım olan 'Dönem özeti .track' tamamen kaldırıldı)
+# 7. YÖNETİCİ ÖZETİ & VERİ KALİTESİ (İLK TASARIM + RAFRADAR V2 + YARATICI GRAFİKLER)
 # -----------------------------------------------------------------------------
 def render_executive_summary(filtered_df=None, raw_df=None, external_filters: dict = None):
     ctx = build_shared_context(raw_df=raw_df, external_filters=external_filters)
@@ -1346,7 +1345,7 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
         # ---------------------------------------------------------------------
         # ORTA BÖLÜM:
         # [1] FİNANSAL PERFORMANS, SEZONSALLIK VE İSKONTO DİSİPLİNİ
-        # [2] KÂR SIZINTISI VE FIRSAT HAVUZU (CİRO KÖPRÜSÜ + 4 SIZINTI KARTI)
+        # [2] KÂR SIZINTISI & PARA AKIŞI (ŞELALE KÖPRÜSÜ VEYA SANKEY DİYAGRAMI)
         # ---------------------------------------------------------------------
         col_left, col_right = st.columns([5.5, 4.5])
 
@@ -1487,72 +1486,135 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
             target_rev_tl = m["net_rev"] + total_opportunity_tl
             uplift_pct = (total_opportunity_tl / m["net_rev"] * 100.0) if m["net_rev"] > 0 else 0.0
 
+            s2_h1, s2_h2 = st.columns([6.2, 3.8])
+            with s2_h2:
+                s2_mode = st.selectbox(
+                    "Grafik",
+                    ["Fırsat Köprüsü (Şelale)", "Para Akışı (Sankey)"],
+                    index=0,
+                    label_visibility="collapsed",
+                    key="rr_exec_s2_mode",
+                )
+            with s2_h1:
+                render_html(
+                    """
+                    <div>
+                        <h2 class="h"><span class="num">2</span>Kâr sızıntısı ve fırsat havuzu</h2>
+                        <p class="sub">4 operasyonel sızıntı ve brüt cirodan net kâra akış</p>
+                    </div>
+                    """
+                )
+
             render_html(
                 f"""
-                <div>
-                    <h2 class="h"><span class="num">2</span>Kâr sızıntısı ve fırsat havuzu (ciro köprüsü)</h2>
-                    <p class="sub">Müdahale edilmeyen 4 operasyonel sızıntının seçili dönem cirosuna etkisi</p>
-                    <div class="section-takeaway">
-                        4 sızıntı kapatıldığında dönem cirosuna +{fmt_tl(total_opportunity_tl, 1)} (+%{uplift_pct:.1f})
-                        eklenerek {fmt_tl(target_rev_tl, 1)} seviyesine ulaşılabilir.
-                    </div>
+                <div class="section-takeaway">
+                    4 sızıntı kapatıldığında dönem cirosuna +{fmt_tl(total_opportunity_tl, 1)} (+%{uplift_pct:.1f})
+                    eklenerek {fmt_tl(target_rev_tl, 1)} seviyesine ulaşılabilir.
                 </div>
                 """
             )
 
-            wf_x = [
-                "Seçili<br>Net Ciro",
-                "+ Pasif VIP<br>Kazanımı",
-                "+ AX Stok<br>Koruması",
-                "+ Ç+1 İkinci<br>Sipariş",
-                "+ İskonto<br>Tavanı",
-                "Hedef<br>Potansiyel",
-            ]
-            wf_y = [
-                m["net_rev"],
-                m["vip_recovery_potential_tl"],
-                m["stockout_prevention_tl"],
-                m["retention_potential_tl"],
-                m["discount_leak_tl"],
-                0,
-            ]
-            wf_text = [
-                fmt_tl(m["net_rev"], 1),
-                f"+{fmt_tl(m['vip_recovery_potential_tl'], 1)}",
-                f"+{fmt_tl(m['stockout_prevention_tl'], 1)}",
-                f"+{fmt_tl(m['retention_potential_tl'], 1)}",
-                f"+{fmt_tl(m['discount_leak_tl'], 1)}",
-                fmt_tl(target_rev_tl, 1),
-            ]
+            if s2_mode == "Para Akışı (Sankey)":
+                gross_v = max(1.0, m["gross_rev"])
+                net_v = max(1.0, m["net_rev"])
+                leak_disc_v = min(max(0.0, m["discount_leak_tl"]), max(0.0, gross_v - net_v))
+                norm_disc_v = max(0.0, (gross_v - net_v) - leak_disc_v)
+                cost_v = max(0.0, gross_v * 0.44)
+                prof_v = max(0.0, m["est_profit"])
 
-            fig2 = go.Figure(
-                go.Waterfall(
-                    orientation="v",
-                    measure=["absolute", "relative", "relative", "relative", "relative", "total"],
-                    x=wf_x,
-                    y=wf_y,
-                    text=wf_text,
-                    textposition="outside",
-                    connector={"line": {"color": "#cfc9bd", "width": 1.5, "dash": "dot"}},
-                    increasing={"marker": {"color": "#3d9a84"}},
-                    decreasing={"marker": {"color": "#d0574f"}},
-                    totals={"marker": {"color": "#1f2a44"}},
+                fig2 = go.Figure(
+                    data=[
+                        go.Sankey(
+                            node=dict(
+                                pad=12,
+                                thickness=16,
+                                line=dict(color="#e4dfd6", width=1),
+                                label=[
+                                    f"Brüt Ciro ({fmt_tl(gross_v, 1)})",
+                                    f"Net Ciro ({fmt_tl(net_v, 1)})",
+                                    f"Standart İskonto ({fmt_tl(norm_disc_v, 1)})",
+                                    f"Fazla İskonto Kaçağı ({fmt_tl(leak_disc_v, 1)})",
+                                    f"Tahmini Brüt Kâr ({fmt_tl(prof_v, 1)})",
+                                    f"Ürün Maliyeti %44 ({fmt_tl(cost_v, 1)})",
+                                ],
+                                color=["#1f2a44", "#3b6fd1", "#cfc9bd", "#d0574f", "#3d9a84", "#e0a526"],
+                            ),
+                            link=dict(
+                                source=[0, 0, 0, 1, 1],
+                                target=[1, 2, 3, 4, 5],
+                                value=[net_v, norm_disc_v, leak_disc_v, prof_v, cost_v],
+                                color=[
+                                    "rgba(59,111,209,0.28)",
+                                    "rgba(207,201,189,0.45)",
+                                    "rgba(208,87,79,0.55)",
+                                    "rgba(61,154,132,0.42)",
+                                    "rgba(224,165,38,0.35)",
+                                ],
+                            ),
+                        )
+                    ]
                 )
-            )
-            fig2.update_layout(
-                height=215,
-                margin=dict(l=8, r=8, t=18, b=8),
-                paper_bgcolor="#ffffff",
-                plot_bgcolor="#ffffff",
-                font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
-                yaxis=dict(
-                    title="Ciro Köprüsü (₺)",
-                    range=[0, target_rev_tl * 1.22],
-                    gridcolor="#efe9de",
-                ),
-                showlegend=False,
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+                fig2.update_layout(
+                    height=215,
+                    margin=dict(l=6, r=6, t=12, b=8),
+                    paper_bgcolor="#ffffff",
+                    font=dict(family="Inter, sans-serif", color="#1f2a44", size=10.5),
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+            else:
+                wf_x = [
+                    "Seçili<br>Net Ciro",
+                    "+ Pasif VIP<br>Kazanımı",
+                    "+ AX Stok<br>Koruması",
+                    "+ Ç+1 İkinci<br>Sipariş",
+                    "+ İskonto<br>Tavanı",
+                    "Hedef<br>Potansiyel",
+                ]
+                wf_y = [
+                    m["net_rev"],
+                    m["vip_recovery_potential_tl"],
+                    m["stockout_prevention_tl"],
+                    m["retention_potential_tl"],
+                    m["discount_leak_tl"],
+                    0,
+                ]
+                wf_text = [
+                    fmt_tl(m["net_rev"], 1),
+                    f"+{fmt_tl(m['vip_recovery_potential_tl'], 1)}",
+                    f"+{fmt_tl(m['stockout_prevention_tl'], 1)}",
+                    f"+{fmt_tl(m['retention_potential_tl'], 1)}",
+                    f"+{fmt_tl(m['discount_leak_tl'], 1)}",
+                    fmt_tl(target_rev_tl, 1),
+                ]
+
+                fig2 = go.Figure(
+                    go.Waterfall(
+                        orientation="v",
+                        measure=["absolute", "relative", "relative", "relative", "relative", "total"],
+                        x=wf_x,
+                        y=wf_y,
+                        text=wf_text,
+                        textposition="outside",
+                        connector={"line": {"color": "#cfc9bd", "width": 1.5, "dash": "dot"}},
+                        increasing={"marker": {"color": "#3d9a84"}},
+                        decreasing={"marker": {"color": "#d0574f"}},
+                        totals={"marker": {"color": "#1f2a44"}},
+                    )
+                )
+                fig2.update_layout(
+                    height=215,
+                    margin=dict(l=8, r=8, t=18, b=8),
+                    paper_bgcolor="#ffffff",
+                    plot_bgcolor="#ffffff",
+                    font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
+                    yaxis=dict(
+                        title="Ciro Köprüsü (₺)",
+                        range=[0, target_rev_tl * 1.22],
+                        gridcolor="#efe9de",
+                    ),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig2, use_container_width=True)
 
             risk_ex = m["top_risk_examples"]
             ex_txt = (
@@ -1599,11 +1661,9 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
         render_html("<div style='margin-top:6px;'></div>")
 
         # ---------------------------------------------------------------------
-        # BÖLÜM 3: PORTFÖY YAPISI, ÇİFT TARAFLI YOĞUNLAŞMA (PARETO) &
-        #          DEPARTMANLAR ARASI ÇIKARIMLAR (CROSS-FUNCTIONAL INSIGHTS)
-        #          (Eski 3. kısım olan 'Dönem özeti .track' tamamen kaldırıldı)
+        # BÖLÜM 3: PORTFÖY YAPISI, PARETO RİSKİ & YARATICI KÂRLILIK HARİTALARI
         # ---------------------------------------------------------------------
-        col_p1, col_p2 = st.columns([4.8, 5.2])
+        col_p1, col_p2 = st.columns([5.2, 4.8])
 
         with col_p1:
             cA, cB, cC = max(1, m["vip_cust_count"]), max(1, m["mid_cust_count"]), max(1, m["tail_cust_count"])
@@ -1611,10 +1671,10 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
 
             render_html(
                 f"""
-                <div class="card">
-                    <h2 class="h"><span class="num">3</span>Çift taraflı yoğunlaşma (Pareto riski) &amp; portföy yapısı</h2>
+                <div class="card" style="margin-bottom:8px;">
+                    <h2 class="h"><span class="num">3</span>Portföy yapısı, Pareto riski &amp; kârlılık radarı</h2>
                     <p class="sub">Cironun %80'i müşterilerin %{m['vip_cust_share_pct']:.1f}'ine ({m['vip_cust_count']} bayi) ve ürünlerin %{m['a_sku_share_pct']:.1f}'ine ({fmt_int(m['a_sku_count'])} SKU) bağımlı</p>
-                    <div class="pareto-box" style="margin-top:10px;">
+                    <div class="pareto-box" style="margin-top:8px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <span style="font-size:12px;font-weight:600;">Müşteriler · {fmt_int(S['cust'])} Bayi</span>
                             <span class="pill" style="background:#d6ece5;color:#14513f;">İlk 10 Bayi = %{m['top10_cust_rev_share']:.1f} Ciro</span>
@@ -1626,7 +1686,7 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
                         </div>
                         <div style="font-size:11px;color:#5b6475;">A Sınıfı (%{m['vip_cust_share_pct']:.1f} bayi) = %80 Ciro · B = %15 Ciro · C = %5 Ciro</div>
                     </div>
-                    <div class="pareto-box" style="margin-bottom:6px;">
+                    <div class="pareto-box" style="margin-bottom:4px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <span style="font-size:12px;font-weight:600;">Ürünler · {fmt_int(S['sku'])} Kitap (SKU)</span>
                             <span class="pill" style="background:#fbe3e0;color:#8f2a24;">{fmt_int(m['dead_sku_count'])} Ölü SKU ({m['dead_threshold']}+ gün)</span>
@@ -1642,38 +1702,169 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
                 """
             )
 
-            pareto_df = pd.DataFrame(
-                {
-                    "Kategori": [
-                        f"A Sınıfı VIP Müşteriler (%{m['vip_cust_share_pct']:.0f} Bayi)",
-                        f"İlk 10 Lokomotif Müşteri",
-                        f"A Sınıfı Yıldız Ürünler (%{m['a_sku_share_pct']:.0f} SKU)",
-                        f"C Sınıfı & Uzun Kuyruk (%{m['c_sku_share_pct']:.0f} SKU)",
-                    ],
-                    "Ciro Payı (%)": [80.0, round(m["top10_cust_rev_share"], 1), 80.0, 5.0],
-                    "Renk": ["#3d9a84", "#1f2a44", "#3b6fd1", "#d9622b"],
-                }
+            creative_view = st.radio(
+                "Analiz Grafiği",
+                [
+                    "🫧 4 Kadranlı Kategori Kârlılık Matrisi",
+                    "🗺️ İl × Kategori Kârlılık Haritası (Treemap)",
+                    "📉 Çift Taraflı Lorenz Bağımlılık Eğrisi",
+                ],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="rr_exec_creative_chart",
             )
-            fig3 = go.Figure(
-                go.Bar(
-                    x=pareto_df["Ciro Payı (%)"],
-                    y=pareto_df["Kategori"],
-                    orientation="h",
-                    marker_color=pareto_df["Renk"],
-                    text=[f"%{v:.1f} Ciro" for v in pareto_df["Ciro Payı (%)"]],
-                    textposition="outside",
+
+            if creative_view == "🫧 4 Kadranlı Kategori Kârlılık Matrisi":
+                cat_q = (
+                    scope_sales_df.groupby("Category", as_index=False)
+                    .agg(
+                        NetRev=("TotalAmount", "sum"),
+                        GrossRev=("GrossAmount", "sum"),
+                        Profit=("EstProfit", "sum"),
+                        Orders=("InvoiceNo", "nunique"),
+                    )
+                    .sort_values("NetRev", ascending=False)
+                    .head(12)
                 )
-            )
-            fig3.update_layout(
-                height=175,
-                margin=dict(l=8, r=55, t=6, b=6),
-                paper_bgcolor="#ffffff",
-                plot_bgcolor="#ffffff",
-                font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
-                xaxis=dict(title="Toplam Ciro Payı (%)", range=[0, 102], gridcolor="#efe9de"),
-                yaxis=dict(autorange="reversed"),
-            )
-            st.plotly_chart(fig3, use_container_width=True)
+                cat_q["DiscPct"] = np.where(
+                    cat_q["GrossRev"] > 0,
+                    (cat_q["GrossRev"] - cat_q["NetRev"]) / cat_q["GrossRev"] * 100.0,
+                    0.0,
+                )
+                cat_q["MarginPct"] = np.where(cat_q["NetRev"] > 0, cat_q["Profit"] / cat_q["NetRev"] * 100.0, 0.0)
+                med_disc = float(cat_q["DiscPct"].median()) if not cat_q.empty else 38.0
+                med_marg = float(cat_q["MarginPct"].median()) if not cat_q.empty else 27.0
+
+                max_rev_c = max(float(cat_q["NetRev"].max()) if not cat_q.empty else 1.0, 1.0)
+                bubble_sizes = [max(14.0, min(46.0, (v / max_rev_c) * 44.0)) for v in cat_q["NetRev"]]
+                bubble_colors = [
+                    "#d0574f" if (d > med_disc and mg < med_marg) else ("#3d9a84" if mg >= med_marg else "#e0a526")
+                    for d, mg in zip(cat_q["DiscPct"], cat_q["MarginPct"])
+                ]
+
+                fig3 = go.Figure()
+                fig3.add_trace(
+                    go.Scatter(
+                        x=cat_q["DiscPct"],
+                        y=cat_q["MarginPct"],
+                        mode="markers+text",
+                        text=[c[:14] for c in cat_q["Category"]],
+                        textposition="top center",
+                        textfont=dict(size=10, color="#1f2a44"),
+                        marker=dict(
+                            size=bubble_sizes,
+                            color=bubble_colors,
+                            opacity=0.85,
+                            line=dict(width=1.5, color="#ffffff"),
+                        ),
+                        customdata=np.stack([cat_q["Category"], cat_q["NetRev"], cat_q["Orders"]], axis=-1),
+                        hovertemplate=(
+                            "<b>%{customdata[0]}</b><br>"
+                            "Net Ciro: ₺%{customdata[1]:,.0f}<br>"
+                            "Ort. İskonto: %%{x:.1f}<br>"
+                            "Brüt Marj: %%{y:.1f}<br>"
+                            "Sipariş: %{customdata[2]}<extra></extra>"
+                        ),
+                    )
+                )
+                fig3.add_vline(x=med_disc, line_dash="dash", line_color="#94a3b8", line_width=1.2)
+                fig3.add_hline(y=med_marg, line_dash="dash", line_color="#94a3b8", line_width=1.2)
+                fig3.update_layout(
+                    height=225,
+                    margin=dict(l=8, r=12, t=14, b=8),
+                    paper_bgcolor="#ffffff",
+                    plot_bgcolor="#ffffff",
+                    font=dict(family="Inter, sans-serif", color="#1f2a44", size=10.5),
+                    xaxis=dict(title="Ortalama İskonto Oranı (%) → Sağ: Fazla İskonto", gridcolor="#efe9de"),
+                    yaxis=dict(title="Brüt Kâr Marjı (%) ↑", gridcolor="#efe9de"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+
+            elif creative_view == "🗺️ İl × Kategori Kârlılık Haritası (Treemap)":
+                top8_cities = scope_sales_df.groupby("City")["TotalAmount"].sum().nlargest(6).index.tolist()
+                tm_df = scope_sales_df[scope_sales_df["City"].isin(top8_cities)].copy()
+                tm_agg = (
+                    tm_df.groupby(["City", "Category"], as_index=False)
+                    .agg(NetRev=("TotalAmount", "sum"), Profit=("EstProfit", "sum"))
+                )
+                tm_agg = tm_agg[tm_agg["NetRev"] > 0].copy()
+                tm_agg["MarginPct"] = np.where(tm_agg["NetRev"] > 0, tm_agg["Profit"] / tm_agg["NetRev"] * 100.0, 0.0)
+
+                fig3 = px.treemap(
+                    tm_agg,
+                    path=[px.Constant("Tüm Türkiye (İlk 6 İl)"), "City", "Category"],
+                    values="NetRev",
+                    color="MarginPct",
+                    color_continuous_scale=["#d0574f", "#e0a526", "#3d9a84"],
+                    labels={"NetRev": "Net Ciro (₺)", "MarginPct": "Marj (%)"},
+                )
+                fig3.update_layout(
+                    height=225,
+                    margin=dict(l=4, r=4, t=10, b=4),
+                    paper_bgcolor="#ffffff",
+                    font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+
+            else:
+                cust_sorted = m["cust_df"].sort_values("Revenue", ascending=False).reset_index(drop=True)
+                sku_sorted = m["sku_df"].sort_values("Revenue", ascending=False).reset_index(drop=True)
+                c_x = np.linspace(0, 100, min(50, max(2, len(cust_sorted))))
+                c_y = np.interp(
+                    c_x,
+                    np.arange(1, len(cust_sorted) + 1) / max(1, len(cust_sorted)) * 100.0,
+                    cust_sorted["CumRevPct"].values if not cust_sorted.empty else [100.0],
+                )
+                s_x = np.linspace(0, 100, min(50, max(2, len(sku_sorted))))
+                s_y = np.interp(
+                    s_x,
+                    np.arange(1, len(sku_sorted) + 1) / max(1, len(sku_sorted)) * 100.0,
+                    sku_sorted["CumRevPct"].values if not sku_sorted.empty else [100.0],
+                )
+
+                fig3 = go.Figure()
+                fig3.add_trace(
+                    go.Scatter(
+                        x=np.concatenate([[0], c_x]),
+                        y=np.concatenate([[0], c_y]),
+                        mode="lines",
+                        name=f"Müşteri Pareto (%{m['vip_cust_share_pct']:.0f} = %80 Ciro)",
+                        line=dict(color="#3d9a84", width=2.8),
+                        fill="tozeroy",
+                        fillcolor="rgba(61,154,132,0.14)",
+                    )
+                )
+                fig3.add_trace(
+                    go.Scatter(
+                        x=np.concatenate([[0], s_x]),
+                        y=np.concatenate([[0], s_y]),
+                        mode="lines",
+                        name=f"Ürün Pareto (%{m['a_sku_share_pct']:.0f} = %80 Ciro)",
+                        line=dict(color="#3b6fd1", width=2.8),
+                    )
+                )
+                fig3.add_trace(
+                    go.Scatter(
+                        x=[0, 100],
+                        y=[0, 100],
+                        mode="lines",
+                        name="Eşit Dağılım Çizgisi",
+                        line=dict(color="#94a3b8", width=1.2, dash="dash"),
+                    )
+                )
+                fig3.add_hline(y=80, line_dash="dot", line_color="#d0574f", line_width=1.2)
+                fig3.update_layout(
+                    height=225,
+                    margin=dict(l=8, r=8, t=18, b=8),
+                    paper_bgcolor="#ffffff",
+                    plot_bgcolor="#ffffff",
+                    font=dict(family="Inter, sans-serif", color="#1f2a44", size=10.5),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    xaxis=dict(title="Portföy Yüzdesi (%)", range=[0, 100], gridcolor="#efe9de"),
+                    yaxis=dict(title="Kümülatif Ciro Payı (%)", range=[0, 102], gridcolor="#efe9de"),
+                )
+                st.plotly_chart(fig3, use_container_width=True)
 
         with col_p2:
             top_anom_cats = m["cat_anom_df"].head(2)["Category"].tolist()
@@ -1728,7 +1919,6 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
 
         # ---------------------------------------------------------------------
         # BÖLÜM 5: YÖNETİM KURULU 30 GÜNLÜK AKSİYON PLANI
-        #          (İlk tasarımdaki 4 Aksiyon Tablosu + HTML İnteraktif Simülatör)
         # ---------------------------------------------------------------------
         risk_ex = m["top_risk_examples"]
         if len(risk_ex) >= 2:

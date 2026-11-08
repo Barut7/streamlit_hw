@@ -1,4 +1,5 @@
 import os
+import datetime
 import warnings
 import streamlit as st
 import pandas as pd
@@ -10,14 +11,14 @@ from plotly.subplots import make_subplots
 warnings.filterwarnings("ignore")
 
 # -----------------------------------------------------------------------------
-# 1. SAYFA YAPILANDIRMASI (DOĞRUDAN ÇALIŞTIRILDIĞINDA)
+# 1. SAYFA YAPILANDIRMASI (SOL MENÜ AÇIK - RAFRADAR V2 STANDART YAPI)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="RafRadar | Yönetici Özeti & Veri Kalitesi",
+        page_title="RafRadar Dashboard",
         page_icon="📊",
         layout="wide",
-        initial_sidebar_state="collapsed",
+        initial_sidebar_state="expanded",
     )
 
 
@@ -38,7 +39,7 @@ def render_html(html_str: str):
 def load_rafradar_data() -> pd.DataFrame:
     """
     B2B işlem verisini Parquet (veya Excel) dosyasından okur, temizler ve
-    Yönetici Özeti ile Veri Kalitesi sekmeleri için tüm türetilmiş değişkenleri hazırlar.
+    tüm türetilmiş değişkenleri hazırlar.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     parquet_candidates = [
@@ -70,11 +71,9 @@ def load_rafradar_data() -> pd.DataFrame:
 
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Tarih dönüşümü
     df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"], errors="coerce")
     df = df.dropna(subset=["InvoiceDate"]).copy()
 
-    # Sayısal alanlar
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0.0)
     df["UnitPrice"] = pd.to_numeric(df["UnitPrice"], errors="coerce").fillna(0.0)
     if "NetPrice" in df.columns:
@@ -82,7 +81,6 @@ def load_rafradar_data() -> pd.DataFrame:
     else:
         df["NetPrice"] = df["UnitPrice"]
 
-    # Metin alanları
     df["InvoiceNo_Str"] = df["InvoiceNo"].astype(str).str.strip()
     df["CustomerID"] = (
         df["CustomerID"].fillna("Anonim_Bayi").astype(str).str.strip()
@@ -105,7 +103,6 @@ def load_rafradar_data() -> pd.DataFrame:
         else "Bilinmiyor"
     )
 
-    # İptal / İade tespiti
     df["IsReturn"] = (
         df["InvoiceNo_Str"].str.upper().str.startswith("C")
         | df["InvoiceNo_Str"].str.upper().str.contains("IADE")
@@ -113,7 +110,6 @@ def load_rafradar_data() -> pd.DataFrame:
         | (df["UnitPrice"] <= 0)
     )
 
-    # Finansal hesaplamalar: Liste Tutarı (Brüt), Net Ciro, İskonto Oranı ve Tahmini Brüt Kâr
     df["GrossAmount"] = df["Quantity"] * df["UnitPrice"]
     df["TotalAmount"] = df["Quantity"] * df["NetPrice"]
     df["DiscountAmount"] = np.maximum(0.0, df["GrossAmount"] - df["TotalAmount"])
@@ -123,11 +119,10 @@ def load_rafradar_data() -> pd.DataFrame:
         0.0,
     )
 
-    # Tahmini Alış Maliyeti = Liste Fiyatının %44'ü (Sektör Standardı Varsayımı)
+    # Tahmini Alış Maliyeti = Liste Fiyatının %44'ü
     df["EstCost"] = df["GrossAmount"] * 0.44
     df["EstProfit"] = df["TotalAmount"] - df["EstCost"]
 
-    # Zaman kırılımları
     df["Date"] = df["InvoiceDate"].dt.date
     df["Year"] = df["InvoiceDate"].dt.year
     df["Month"] = df["InvoiceDate"].dt.month
@@ -139,19 +134,33 @@ def load_rafradar_data() -> pd.DataFrame:
 
 
 # -----------------------------------------------------------------------------
-# 3. YARDIMCI FORMATLAMA VE RAF-RADAR V2 TASARIM DİLİ (CSS)
+# 3. FORMATLAMA FONKSİYONLARI VE RAFRADAR V2 CSS STİLİ
 # -----------------------------------------------------------------------------
+MONTH_TR_SHORT = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+
+
+def fmt_date_tr(d: datetime.date) -> str:
+    """Tarihi '1 Kas 2020' formatına çevirir."""
+    return f"{d.day} {MONTH_TR_SHORT[d.month - 1]} {d.year}"
+
+
+def fmt_range_tr(d1: datetime.date, d2: datetime.date) -> str:
+    """Tarih aralığını '1 Kas – 14 Ara 2020' formatına çevirir."""
+    if d1.year == d2.year:
+        return f"{d1.day} {MONTH_TR_SHORT[d1.month - 1]} – {d2.day} {MONTH_TR_SHORT[d2.month - 1]} {d2.year}"
+    return f"{fmt_date_tr(d1)} – {fmt_date_tr(d2)}"
+
+
 def fmt_tl(val: float, decimals: int = 2) -> str:
-    """TL değerlerini yönetici okumasına uygun (M ₺, bin ₺) formatlar."""
     if pd.isna(val):
         return "0 ₺"
     sign = "-" if val < 0 else ""
     v = abs(float(val))
     if v >= 1_000_000:
-        return f"{sign}₺{v / 1_000_000:,.{decimals}f} Mn".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{sign}{v / 1_000_000:,.{decimals}f} M ₺".replace(",", "X").replace(".", ",").replace("X", ".")
     if v >= 1_000:
-        return f"{sign}₺{v / 1_000:,.1f} Bin".replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"{sign}₺{v:,.0f}".replace(",", ".")
+        return f"{sign}{v / 1_000:,.1f} bin ₺".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{sign}{v:,.0f} ₺".replace(",", ".")
 
 
 def fmt_int(val: float) -> str:
@@ -160,12 +169,18 @@ def fmt_int(val: float) -> str:
     return f"{int(round(val)):,}".replace(",", ".")
 
 
+def chg_badge_html(pct: float, invert: bool = False) -> str:
+    """rafradar-versiyon2.html'deki .chg (.pos / .neg / .mute) rozetini üretir."""
+    if pd.isna(pct) or abs(pct) < 0.15:
+        return '<span class="chg mute">%0,0</span>'
+    is_good = (pct < 0) if invert else (pct > 0)
+    cls = "pos" if is_good else "neg"
+    sign = "+" if pct > 0 else "−"
+    val_str = f"{abs(pct):.1f}".replace(".", ",")
+    return f'<span class="chg {cls}">{sign}%{val_str}</span>'
+
+
 def inject_rafradar_v2_css():
-    """
-    rafradar-versiyon2.html dosyasındaki sıcak krem (--bg:#f6f3ee), lacivert (#1f2a44),
-    zümrüt/teal (#3d9a84), altın sarısı (#e0a526) ve kiremit (#d0574f) renk paleti ile
-    Poppins + Inter tipografisini uygular.
-    """
     render_html(
         """
         <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -177,174 +192,141 @@ def inject_rafradar_v2_css():
             --fg: #1f2a44;
             --side: #faf7f2;
             --line: #e4dfd6;
-            --teal: #3d9a84;
-            --teal-dark: #14513f;
-            --teal-soft: #d6ece5;
-            --gold: #e0a526;
-            --gold-soft: #fdf0cf;
-            --gold-dark: #7a5600;
-            --coral: #d0574f;
-            --coral-soft: #fbe3e0;
-            --coral-dark: #8f2a24;
-            --blue: #3b6fd1;
-            --muted: #5b6475;
         }
         .stApp {
-            background-color: var(--bg) !important;
+            background-color: #f6f3ee !important;
             font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            color: var(--fg);
-        }
-        /* Üst RafRadar V2 Barı */
-        .rr-topbar {
-            background: #faf7f2;
-            border: 1px solid #e4dfd6;
-            border-radius: 12px;
-            padding: 14px 20px;
-            margin-bottom: 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 12px;
-        }
-        .rr-logo {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-family: 'Poppins', sans-serif;
-            font-weight: 700;
-            font-size: 21px;
             color: #1f2a44;
         }
-        .rr-page-header h1 {
+        .block-container {
+            padding-top: 1.5rem !important;
+            padding-bottom: 3rem !important;
+        }
+        /* Sol Kenar Çubuğu (#sidecol / #side) */
+        section[data-testid="stSidebar"] {
+            background-color: #faf7f2 !important;
+            border-right: 1px solid #e4dfd6 !important;
+        }
+        section[data-testid="stSidebar"] .block-container {
+            padding-top: 1.2rem !important;
+        }
+        /* Üst Sayfa Başlığı (head() fonksiyonu karşılığı) */
+        .rr-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 6px;
+        }
+        .rr-header h1 {
             font-family: 'Poppins', sans-serif;
             font-weight: 700;
-            font-size: 26px;
+            font-size: 28px;
             color: #1f2a44;
             margin: 0;
             line-height: 1.2;
         }
-        .rr-page-header p {
-            margin: 3px 0 0 0;
-            font-size: 13.5px;
+        .rr-header p {
+            margin: 4px 0 0 0;
+            font-size: 14px;
             font-style: italic;
             color: #5b6475;
         }
-        .rr-pill-row {
+        /* Seçili & Karşılaştırma Dönemi Hapları (pills() karşılığı) */
+        .rr-pills {
             display: flex;
             gap: 8px;
             flex-wrap: wrap;
             align-items: center;
-            margin: 10px 0 14px 0;
+            margin: 8px 0 14px 0;
         }
-        .rr-pill {
+        .pill {
             display: inline-block;
-            font-size: 11.5px;
+            font-size: 11px;
             font-weight: 600;
-            padding: 4px 11px;
+            padding: 3px 9px;
             border-radius: 999px;
             white-space: nowrap;
         }
-        .rr-pill.mint  { background: #d6ece5; color: #14513f; }
-        .rr-pill.Gold  { background: #fdf0cf; color: #7a5600; }
-        .rr-pill.rose  { background: #fbe3e0; color: #8f2a24; }
-        .rr-pill.stone { background: #ece7dd; color: #1f2a44; }
-        .rr-pill.navy  { background: #1f2a44; color: #ffffff; }
-
-        /* KPI Kartları (rafradar-versiyon2 .card.kpi) */
-        .kpi-card {
-            background: #ffffff;
-            border: 1px solid #e4dfd6;
-            border-top: 4px solid #3d9a84;
-            border-radius: 12px;
-            padding: 14px 16px;
-            box-shadow: 0 1px 3px rgba(31, 42, 68, 0.04);
-            height: 100%;
-        }
-        .kpi-card.gold  { border-top-color: #e0a526; }
-        .kpi-card.blue  { border-top-color: #3b6fd1; }
-        .kpi-card.coral { border-top-color: #d0574f; }
-        .kpi-card.navy  { border-top-color: #1f2a44; }
-
-        .kpi-label {
-            font-size: 12px;
-            font-weight: 500;
-            color: #5b6475;
-            margin-bottom: 3px;
-        }
-        .kpi-value {
-            font-family: 'Poppins', sans-serif;
-            font-size: 22px;
-            font-weight: 600;
-            color: #1f2a44;
-            line-height: 1.2;
-            margin: 2px 0 6px 0;
-        }
-        .kpi-rule {
-            border-top: 1px dashed #d9d3c7;
-            margin: 8px 0 6px 0;
-        }
-        .kpi-delta-pos {
-            font-size: 11px;
-            font-weight: 600;
-            color: #14513f;
-            background: #d6ece5;
-            padding: 2px 8px;
-            border-radius: 999px;
-            display: inline-block;
-        }
-        .kpi-delta-neg {
-            font-size: 11px;
-            font-weight: 600;
-            color: #8f2a24;
-            background: #fbe3e0;
-            padding: 2px 8px;
-            border-radius: 999px;
-            display: inline-block;
-        }
-        .kpi-delta-warn {
-            font-size: 11px;
-            font-weight: 600;
-            color: #7a5600;
-            background: #fdf0cf;
-            padding: 2px 8px;
-            border-radius: 999px;
-            display: inline-block;
-        }
-        .kpi-subtext {
-            font-size: 11px;
-            color: #5b6475;
-            margin-left: 5px;
-        }
-
-        /* Bölüm Kartları (rafradar-versiyon2 .card + .h + .num) */
-        .section-card {
+        /* KPI Kartları (kcard() birebir karşılığı) */
+        .card {
             background: #ffffff;
             border: 1px solid #e4dfd6;
             border-radius: 12px;
             padding: 18px 20px;
-            margin-bottom: 14px;
-            box-shadow: 0 1px 4px rgba(31, 42, 68, 0.03);
+            box-sizing: border-box;
         }
-        .section-card.teal-left { border-left: 4px solid #3d9a84; }
-        .section-card.gold-left { border-left: 4px solid #e0a526; }
-        .section-card.coral-left { border-left: 4px solid #d0574f; }
-
-        .rr-h2 {
+        .kpi {
+            border-top: 4px solid #3d9a84;
+            padding: 14px 16px;
+            height: 100%;
+        }
+        .kl {
+            font-size: 12px;
+            color: #5b6475;
+        }
+        .kv {
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
-            font-size: 15.5px;
+            font-size: 22px;
+            color: #1f2a44;
+            margin: 2px 0;
+        }
+        .kv2 {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 16px;
+            color: #1f2a44;
+            margin: 2px 0;
+        }
+        .chg {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 999px;
+            white-space: nowrap;
+        }
+        .pos  { background: #d6ece5; color: #14513f; }
+        .neg  { background: #fbe3e0; color: #8f2a24; }
+        .mute { background: #f0ebe2; color: #5b6475; }
+        .neu  { background: #e4e7ee; color: #2b3550; }
+        .rule {
+            border-top: 1px dashed #d9d3c7;
+            margin: 8px 0 6px 0;
+        }
+        /* Bilgi Notu Bandı (note() karşılığı) */
+        .rr-note {
+            font-size: 12px;
+            color: #5b6475;
+            background: #faf7f2;
+            border: 1px solid #e4dfd6;
+            border-radius: 10px;
+            padding: 8px 14px;
+            margin: 12px 0 14px 0;
+        }
+        /* Bölüm Kartları (.h, .sub, .num) */
+        .h {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 15px;
             color: #1f2a44;
             margin: 0;
             display: flex;
             align-items: center;
         }
-        .rr-num {
+        .sub {
+            font-size: 12px;
+            color: #5b6475;
+            margin: 4px 0 0 0;
+        }
+        .num {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 21px;
-            height: 21px;
+            width: 20px;
+            height: 20px;
             border-radius: 50%;
             background: #1f2a44;
             color: #ffffff;
@@ -353,16 +335,11 @@ def inject_rafradar_v2_css():
             margin-right: 8px;
             flex-shrink: 0;
         }
-        .rr-sub {
-            font-size: 12px;
-            color: #5b6475;
-            margin: 3px 0 8px 0;
-        }
         .section-takeaway {
-            font-size: 14.5px;
+            font-size: 14px;
             font-weight: 600;
             color: #1f2a44;
-            margin: 6px 0 8px 0;
+            margin: 8px 0 6px 0;
             line-height: 1.4;
         }
         .insight-box {
@@ -371,18 +348,17 @@ def inject_rafradar_v2_css():
             border-left: 4px solid #3d9a84;
             padding: 10px 14px;
             border-radius: 8px;
-            font-size: 12.5px;
+            font-size: 12px;
             color: #1f2a44;
             margin-top: 8px;
             margin-bottom: 14px;
             line-height: 1.5;
         }
-
-        /* Sızıntı / Fırsat Mini Kartları (.out & .mini) */
+        /* Sızıntı / Fırsat Mini Kartları */
         .leak-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 9px;
+            gap: 8px;
             margin-top: 6px;
             margin-bottom: 14px;
         }
@@ -405,28 +381,12 @@ def inject_rafradar_v2_css():
             color: #5b6475;
             line-height: 1.38;
         }
-
-        /* Portföy / Pareto Kutuları (rafradar-versiyon2 2. Panel tarzı) */
+        /* Portföy / Pareto Kutuları */
         .pareto-box {
             background: #ffffff;
             border: 1px solid #e4dfd6;
             border-radius: 12px;
             padding: 14px 16px;
-            margin-bottom: 10px;
-        }
-        .pareto-title {
-            font-family: 'Poppins', sans-serif;
-            font-size: 13.5px;
-            font-weight: 600;
-            color: #1f2a44;
-            margin-bottom: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .pareto-sub {
-            font-size: 11.5px;
-            color: #5b6475;
             margin-bottom: 10px;
         }
         .abc-stack-bar {
@@ -436,9 +396,7 @@ def inject_rafradar_v2_css():
             overflow: hidden;
             margin: 6px 0 8px 0;
         }
-        .tier-row {
-            margin-bottom: 8px;
-        }
+        .tier-row { margin-bottom: 8px; }
         .tier-header {
             display: flex;
             justify-content: space-between;
@@ -454,25 +412,21 @@ def inject_rafradar_v2_css():
             border-radius: 999px;
             overflow: hidden;
         }
-        .tier-bar-fill {
-            height: 100%;
-            border-radius: 999px;
-        }
+        .tier-bar-fill { height: 100%; border-radius: 999px; }
 
-        /* 30 Günlük Aksiyon Kartları (rafradar-versiyon2 5. Panel tarzı) */
+        /* 30 Günlük Aksiyon Kartları */
         .action-card {
             background: #ffffff;
             border: 1px solid #e4dfd6;
             border-top: 4px solid #3d9a84;
             border-radius: 10px;
-            padding: 13px 15px;
+            padding: 12px 14px;
             margin-bottom: 10px;
         }
         .action-card.urgent { border-top-color: #d0574f; }
         .action-card.high   { border-top-color: #e0a526; }
         .action-card.medium { border-top-color: #3d9a84; }
         .action-card.blue   { border-top-color: #3b6fd1; }
-
         .action-top {
             display: flex;
             justify-content: space-between;
@@ -480,19 +434,6 @@ def inject_rafradar_v2_css():
             margin-bottom: 6px;
             flex-wrap: wrap;
             gap: 6px;
-        }
-        .action-dept-group {
-            display: flex;
-            gap: 5px;
-            flex-wrap: wrap;
-        }
-        .action-dept-pill {
-            font-size: 11px;
-            font-weight: 600;
-            color: #ffffff;
-            background: #1f2a44;
-            padding: 2px 9px;
-            border-radius: 999px;
         }
         .action-headline {
             font-family: 'Poppins', sans-serif;
@@ -524,16 +465,16 @@ def inject_rafradar_v2_css():
             font-size: 14px;
         }
 
-        /* Veri Kalitesi 5 Adım Kutuları (rafradar-versiyon2 kalite 1. Panel) */
+        /* Veri Kalitesi 5 Adım Kutuları */
         .vq-step-row {
             display: flex;
             flex-wrap: wrap;
             gap: 6px;
-            margin: 10px 0 14px 0;
+            margin: 12px 0 4px 0;
             align-items: stretch;
         }
         .vq-step {
-            flex: 1 1 140px;
+            flex: 1 1 135px;
             min-width: 0;
             border: 1px solid #e4dfd6;
             border-radius: 10px;
@@ -543,17 +484,16 @@ def inject_rafradar_v2_css():
             font-size: 11px;
             font-weight: 600;
             color: #5b6475;
-            text-transform: uppercase;
         }
         .vq-step-val {
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
-            font-size: 21px;
+            font-size: 22px;
             color: #1f2a44;
             margin: 4px 0;
         }
         .vq-step-desc {
-            font-size: 11.5px;
+            font-size: 12px;
             color: #1f2a44;
             line-height: 1.35;
         }
@@ -561,8 +501,6 @@ def inject_rafradar_v2_css():
             align-self: center;
             color: #5b6475;
             font-size: 18px;
-            font-weight: 600;
-            padding: 0 2px;
         }
         .formula-card {
             background: #faf7f2;
@@ -591,26 +529,12 @@ def inject_rafradar_v2_css():
             margin: 4px 0;
             font-weight: 600;
         }
-        /* Sağ Alt Yüzen Sohbet Butonu Süslemesi */
-        div[data-testid="stPopover"] > button {
-            background-color: #1f2a44 !important;
-            color: #ffffff !important;
-            border: 2px solid #3d9a84 !important;
-            border-radius: 999px !important;
-            font-family: 'Poppins', sans-serif !important;
-            font-weight: 600 !important;
-            padding: 8px 16px !important;
-            box-shadow: 0 4px 14px rgba(31, 42, 68, 0.18) !important;
-        }
-        div[data-testid="stPopover"] > button:hover {
-            background-color: #3d9a84 !important;
-            color: #ffffff !important;
-        }
-        /* rafradar-versiyon2.html Sağ Alt Yüzen Sohbet Balonu (#chatwrap / .cwb) */
+
+        /* Sağ Alt Yüzen Sohbet Balonu (#chatwrap / .cwb) */
         .rr-float-wrap {
             position: fixed;
-            right: 22px;
-            bottom: 22px;
+            right: 20px;
+            bottom: 20px;
             z-index: 9999;
         }
         .rr-float-wrap > summary {
@@ -620,12 +544,12 @@ def inject_rafradar_v2_css():
             border-radius: 50%;
             background: #3d9a84;
             color: #ffffff;
-            box-shadow: 0 6px 18px rgba(31, 42, 68, 0.28);
+            box-shadow: 0 6px 18px rgba(31, 42, 68, 0.25);
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            border: 2px solid #ffffff;
+            border: 0;
             transition: transform 0.15s ease, background 0.15s ease;
         }
         .rr-float-wrap > summary::-webkit-details-marker { display: none; }
@@ -636,20 +560,20 @@ def inject_rafradar_v2_css():
         .rr-float-panel {
             position: absolute;
             right: 0;
-            bottom: 68px;
+            bottom: 66px;
             width: 360px;
-            max-width: calc(100vw - 32px);
-            max-height: 75vh;
+            max-width: calc(100vw - 24px);
+            max-height: calc(100vh - 100px);
             overflow-y: auto;
             background: #ffffff;
             border: 1px solid #e4dfd6;
-            border-radius: 14px;
-            box-shadow: 0 12px 32px rgba(31, 42, 68, 0.25);
+            border-radius: 12px;
+            box-shadow: 0 10px 28px rgba(31, 42, 68, 0.25);
             padding: 14px;
             color: #1f2a44;
         }
         .rr-qa-chip {
-            border: 1px solid #e4dfd6;
+            border: 1px solid #cfc9bd;
             border-radius: 10px;
             background: #faf7f2;
             margin-bottom: 7px;
@@ -679,29 +603,265 @@ def inject_rafradar_v2_css():
     )
 
 
+def render_kcard(
+    label: str,
+    main_val: str,
+    main_chg_html: str,
+    sub_label: str,
+    sub_val: str,
+    sub_chg_html: str,
+    top_color: str = "#3d9a84",
+):
+    """rafradar-versiyon2.html içindeki kcard() fonksiyonunun birebir karşılığı."""
+    render_html(
+        f"""
+        <div class="card kpi" style="border-top-color:{top_color};">
+            <div class="kl">{label}</div>
+            <div style="display:flex; align-items:baseline; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+                <div class="kv">{main_val}</div>
+                {main_chg_html}
+            </div>
+            <div class="rule"></div>
+            <div style="display:flex; align-items:baseline; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+                <span class="kl">{sub_label}</span>
+                <div>
+                    <span class="kv2">{sub_val}</span>
+                    {sub_chg_html}
+                </div>
+            </div>
+        </div>
+        """
+    )
+
+
 # -----------------------------------------------------------------------------
-# 4. DİNAMİK ANALİTİK HESAPLAMA MOTORU
+# 4. SOL MENÜ (SIDEBAR): RAFRADAR V2 STANDART FİLTRE VE NAVİGASYON YAPISI
 # -----------------------------------------------------------------------------
-def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame, raw_scope_df: pd.DataFrame) -> dict:
+def render_rafradar_sidebar(valid_all_df: pd.DataFrame, show_page_nav: bool = True) -> dict:
     """
-    Seçilen tarih ve kategori filtresine göre ekrandaki tüm KPI, sızıntı,
-    Pareto, RFM, ABC ve anomali metriklerini canlı olarak hesaplar.
+    rafradar-versiyon2.html'deki sol sütunu (#sidecol / #side) birebir oluşturur:
+    - RafRadar Logo & Başlık
+    - Sayfa / Bölüm Seçimi (Yönetici Özeti, Veri Kalitesi)
+    - Seçili Dönem (fa – fb, varsayılan: 1 Kas – 14 Ara 2020)
+    - Karşılaştırma Dönemi (fca – fcb, varsayılan: 1 Eyl – 31 Eki 2020)
+    - [Önceki dönem] ve [Sıfırla] butonları
+    - Kategori Filtresi
     """
+    global_min = valid_all_df["Date"].min()
+    global_max = valid_all_df["Date"].max()
+
+    # rafradar-versiyon2.html varsayılan tarihleri:
+    # F = { a: '2020-11-01', b: '2020-12-14', ca: '2020-09-01', cb: '2020-10-31' }
+    def_a = max(global_min, min(global_max, datetime.date(2020, 11, 1)))
+    def_b = max(global_min, min(global_max, datetime.date(2020, 12, 14)))
+    def_ca = max(global_min, min(global_max, datetime.date(2020, 9, 1)))
+    def_cb = max(global_min, min(global_max, datetime.date(2020, 10, 31)))
+
+    if "rr_fa" not in st.session_state:
+        st.session_state["rr_fa"] = def_a
+        st.session_state["rr_fb"] = def_b
+        st.session_state["rr_fca"] = def_ca
+        st.session_state["rr_fcb"] = def_cb
+
+    with st.sidebar:
+        render_html(
+            """
+            <div style="display:flex; align-items:center; gap:9px; padding-bottom:12px; border-bottom:1px solid #e4dfd6; margin-bottom:12px;">
+                <svg width="28" height="26" viewBox="0 0 28 26" aria-hidden="true">
+                    <rect x="2" y="10" width="6" height="14" fill="#1f2a44"/>
+                    <rect x="11" y="3" width="6" height="21" fill="#3d9a84"/>
+                    <rect x="20" y="14" width="6" height="10" fill="#e0a526"/>
+                </svg>
+                <div>
+                    <div style="font-family:'Poppins',sans-serif; font-weight:700; font-size:20px; color:#1f2a44; line-height:1.1;">RafRadar</div>
+                    <div style="font-size:11px; color:#5b6475;">B2B Karar Destek Sistemi</div>
+                </div>
+            </div>
+            """
+        )
+
+        if show_page_nav:
+            selected_page = st.radio(
+                "Bölüm Seçimi",
+                ["Yönetici Özeti", "Veri Kalitesi"],
+                index=0,
+                key="rr_side_page",
+            )
+            render_html("<div style='border-top:1px solid #e4dfd6; margin:10px 0;'></div>")
+        else:
+            selected_page = "Yönetici Özeti"
+
+        # Hızlı Dönem Kısayolu + Seçili Dönem (fa, fb)
+        render_html(
+            "<div style='font-family:Poppins,sans-serif; font-size:12.5px; font-weight:600; color:#1f2a44; margin-bottom:4px;'>📅 Seçili dönem</div>"
+        )
+        preset = st.selectbox(
+            "Hızlı Dönem Seç",
+            [
+                "Özel / Varsayılan (1 Kas – 14 Ara)",
+                "Tüm Yıl (1 Oca – 31 Ara 2020)",
+                "Son Çeyrek (Eki – Ara 2020)",
+                "Okul Sezonu (Eyl – Kas 2020)",
+                "Yaz Dönemi (Haz – Ağu 2020)",
+                "İlk Yarıyıl (Oca – Haz 2020)",
+            ],
+            index=0,
+            label_visibility="collapsed",
+            key="rr_preset_sel",
+        )
+
+        if preset == "Tüm Yıl (1 Oca – 31 Ara 2020)":
+            st.session_state["rr_fa"] = global_min
+            st.session_state["rr_fb"] = global_max
+        elif preset == "Son Çeyrek (Eki – Ara 2020)":
+            st.session_state["rr_fa"] = max(global_min, datetime.date(2020, 10, 1))
+            st.session_state["rr_fb"] = global_max
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 7, 1))
+            st.session_state["rr_fcb"] = max(global_min, datetime.date(2020, 9, 30))
+        elif preset == "Okul Sezonu (Eyl – Kas 2020)":
+            st.session_state["rr_fa"] = max(global_min, datetime.date(2020, 9, 1))
+            st.session_state["rr_fb"] = max(global_min, datetime.date(2020, 11, 30))
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 6, 1))
+            st.session_state["rr_fcb"] = max(global_min, datetime.date(2020, 8, 31))
+        elif preset == "Yaz Dönemi (Haz – Ağu 2020)":
+            st.session_state["rr_fa"] = max(global_min, datetime.date(2020, 6, 1))
+            st.session_state["rr_fb"] = max(global_min, datetime.date(2020, 8, 31))
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 3, 1))
+            st.session_state["rr_fcb"] = max(global_min, datetime.date(2020, 5, 31))
+        elif preset == "İlk Yarıyıl (Oca – Haz 2020)":
+            st.session_state["rr_fa"] = global_min
+            st.session_state["rr_fb"] = max(global_min, datetime.date(2020, 6, 30))
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 7, 1))
+            st.session_state["rr_fcb"] = global_max
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            fa = st.date_input(
+                "Başlangıç",
+                value=st.session_state["rr_fa"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_fa_inp",
+            )
+        with sc2:
+            fb = st.date_input(
+                "Bitiş",
+                value=st.session_state["rr_fb"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_fb_inp",
+            )
+        if fa > fb:
+            fa, fb = fb, fa
+        st.session_state["rr_fa"], st.session_state["rr_fb"] = fa, fb
+
+        # Karşılaştırma Dönemi (fca, fcb)
+        render_html(
+            "<div style='font-family:Poppins,sans-serif; font-size:12.5px; font-weight:600; color:#1f2a44; margin:10px 0 4px 0;'>⚖️ Karşılaştırma dönemi</div>"
+        )
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            fca = st.date_input(
+                "Karş. Başlangıç",
+                value=st.session_state["rr_fca"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_fca_inp",
+            )
+        with cc2:
+            fcb = st.date_input(
+                "Karş. Bitiş",
+                value=st.session_state["rr_fcb"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_fcb_inp",
+            )
+        if fca > fcb:
+            fca, fcb = fcb, fca
+        st.session_state["rr_fca"], st.session_state["rr_fcb"] = fca, fcb
+
+        # rafradar-versiyon2.html'deki [Önceki dönem] (#prevper) ve [Sıfırla] (#reset) butonları
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            if st.button("Önceki dönem", use_container_width=True, key="rr_btn_prevper"):
+                days_len = max(1, (fb - fa).days + 1)
+                new_cb = max(global_min, fa - datetime.timedelta(days=1))
+                new_ca = max(global_min, new_cb - datetime.timedelta(days=days_len - 1))
+                st.session_state["rr_fca"] = new_ca
+                st.session_state["rr_fcb"] = new_cb
+                st.rerun()
+        with b_col2:
+            if st.button("Sıfırla", use_container_width=True, key="rr_btn_reset"):
+                st.session_state["rr_fa"] = def_a
+                st.session_state["rr_fb"] = def_b
+                st.session_state["rr_fca"] = def_ca
+                st.session_state["rr_fcb"] = def_cb
+                st.rerun()
+
+        render_html("<div style='border-top:1px solid #e4dfd6; margin:10px 0;'></div>")
+
+        # Kategori Filtresi
+        top_cats = (
+            valid_all_df.groupby("Category")["TotalAmount"]
+            .sum()
+            .nlargest(25)
+            .index.tolist()
+        )
+        selected_cat = st.selectbox(
+            "📚 Kategori Filtresi",
+            ["Tüm Kategoriler"] + top_cats,
+            index=0,
+            key="rr_side_cat",
+        )
+
+    return {
+        "page": selected_page,
+        "fa": st.session_state["rr_fa"],
+        "fb": st.session_state["rr_fb"],
+        "fca": st.session_state["rr_fca"],
+        "fcb": st.session_state["rr_fcb"],
+        "category": selected_cat,
+    }
+
+
+# -----------------------------------------------------------------------------
+# 5. DİNAMİK ANALİTİK HESAPLAMA MOTORU (SEÇİLİ vs KARŞILAŞTIRMA DÖNEMİ)
+# -----------------------------------------------------------------------------
+def compute_dynamic_metrics(sales_df: pd.DataFrame, comp_sales_df: pd.DataFrame, raw_scope_df: pd.DataFrame, s_days: int, c_days: int) -> dict:
     net_rev = sales_df["TotalAmount"].sum()
     gross_rev = sales_df["GrossAmount"].sum()
     est_profit = sales_df["EstProfit"].sum()
     profit_margin = (est_profit / net_rev * 100.0) if net_rev > 0 else 0.0
     avg_discount = ((gross_rev - net_rev) / gross_rev * 100.0) if gross_rev > 0 else 0.0
 
-    prev_net_rev = prev_sales_df["TotalAmount"].sum() if not prev_sales_df.empty else 0.0
-    rev_growth_pct = ((net_rev - prev_net_rev) / prev_net_rev * 100.0) if prev_net_rev > 0 else 0.0
+    comp_net_rev = comp_sales_df["TotalAmount"].sum() if not comp_sales_df.empty else 0.0
+    comp_gross_rev = comp_sales_df["GrossAmount"].sum() if not comp_sales_df.empty else 0.0
+    comp_profit = comp_sales_df["EstProfit"].sum() if not comp_sales_df.empty else 0.0
+    comp_discount = ((comp_gross_rev - comp_net_rev) / comp_gross_rev * 100.0) if comp_gross_rev > 0 else 0.0
+
+    def rel_pct(a, b):
+        if b == 0 or pd.isna(b):
+            return 0.0
+        return ((a - b) / abs(b)) * 100.0
+
+    # Toplam ve Günlük Ortalama Değişimler (rafradar-versiyon2.html S ve C mantığı)
+    d_net_rev = net_rev / max(1, s_days)
+    d_comp_rev = comp_net_rev / max(1, c_days)
+
+    d_profit = est_profit / max(1, s_days)
+    d_comp_profit = comp_profit / max(1, c_days)
 
     active_customers = sales_df["CustomerID"].nunique()
-    prev_customers = prev_sales_df["CustomerID"].nunique() if not prev_sales_df.empty else 0
-    cust_diff = active_customers - prev_customers
+    comp_customers = comp_sales_df["CustomerID"].nunique() if not comp_sales_df.empty else 0
+    d_cust = sales_df.groupby("Date")["CustomerID"].nunique().mean() if not sales_df.empty else 0.0
+    d_comp_cust = comp_sales_df.groupby("Date")["CustomerID"].nunique().mean() if not comp_sales_df.empty else 0.0
 
     active_skus = sales_df["Description"].nunique()
+    comp_skus = comp_sales_df["Description"].nunique() if not comp_sales_df.empty else 0
     total_invoices = sales_df["InvoiceNo"].nunique()
+    comp_invoices = comp_sales_df["InvoiceNo"].nunique() if not comp_sales_df.empty else 0
+    d_inv = total_invoices / max(1, s_days)
+    d_comp_inv = comp_invoices / max(1, c_days)
 
     # Kategori Medyan İskontosu ve Norm Dışı İskonto Kaçağı (+10 Puan Sapma)
     cat_medians = sales_df.groupby("Category")["DiscountPct"].transform("median")
@@ -734,7 +894,7 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
         .sort_values("LeakTL", ascending=False)
     )
 
-    # Müşteri Pareto (80/20) ve RFM / Kayıp Riski Analizi
+    # Müşteri Pareto (80/20) ve Kayıp Riski Analizi
     max_date_in_selection = sales_df["InvoiceDate"].max()
     cust_df = (
         sales_df.groupby("CustomerID", as_index=False)
@@ -764,7 +924,7 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     vip_cust_share_pct = (vip_cust_count / max(1, active_customers)) * 100.0
     top10_cust_rev_share = (cust_df.head(10)["Revenue"].sum() / net_rev * 100.0) if net_rev > 0 else 0.0
 
-    recency_threshold = max(30, int((sales_df["InvoiceDate"].max() - sales_df["InvoiceDate"].min()).days * 0.25))
+    recency_threshold = max(14, int(s_days * 0.30))
     recency_threshold = min(recency_threshold, 90)
     top_half_cutoff = cust_df["Revenue"].quantile(0.65) if len(cust_df) > 3 else 0
     at_risk_vips = cust_df[(cust_df["Revenue"] >= top_half_cutoff) & (cust_df["RecencyDays"] >= recency_threshold)].copy()
@@ -807,12 +967,12 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
     c_sku_share_pct = (c_sku_count / max(1, active_skus)) * 100.0
 
     sku_df["DaysSinceSale"] = (max_date_in_selection - sku_df["LastSale"]).dt.days
-    dead_sku_count = int((sku_df["DaysSinceSale"] >= 120).sum())
+    dead_threshold = 120 if s_days >= 150 else max(21, int(s_days * 0.5))
+    dead_sku_count = int((sku_df["DaysSinceSale"] >= dead_threshold).sum())
 
     a_class_rev = float(sku_df.loc[sku_df["ABC"] == "A Sınıfı Yıldız Kitaplar", "Revenue"].sum())
     stockout_prevention_tl = a_class_rev * 0.045
 
-    # En çok ciro yapan şehir ve kategori
     city_rev = sales_df.groupby("City")["TotalAmount"].sum().sort_values(ascending=False)
     top_city = city_rev.index[0] if not city_rev.empty else "İstanbul"
     top_city_share = (city_rev.iloc[0] / net_rev * 100.0) if (not city_rev.empty and net_rev > 0) else 0.0
@@ -823,16 +983,27 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
 
     return {
         "net_rev": net_rev,
+        "d_net_rev": d_net_rev,
+        "rev_chg": rel_pct(net_rev, comp_net_rev),
+        "d_rev_chg": rel_pct(d_net_rev, d_comp_rev),
         "gross_rev": gross_rev,
         "est_profit": est_profit,
+        "d_profit": d_profit,
+        "profit_chg": rel_pct(est_profit, comp_profit),
+        "d_profit_chg": rel_pct(d_profit, d_comp_profit),
         "profit_margin": profit_margin,
         "avg_discount": avg_discount,
-        "rev_growth_pct": rev_growth_pct,
-        "prev_net_rev": prev_net_rev,
+        "disc_diff_pts": avg_discount - comp_discount,
         "active_customers": active_customers,
-        "cust_diff": cust_diff,
+        "cust_chg": rel_pct(active_customers, comp_customers),
+        "d_cust": d_cust,
+        "d_cust_chg": rel_pct(d_cust, d_comp_cust),
         "active_skus": active_skus,
+        "sku_chg": rel_pct(active_skus, comp_skus),
         "total_invoices": total_invoices,
+        "inv_chg": rel_pct(total_invoices, comp_invoices),
+        "d_inv": d_inv,
+        "d_inv_chg": rel_pct(d_inv, d_comp_inv),
         "suspicious_orders_count": suspicious_orders_count,
         "discount_leak_tl": discount_leak_tl,
         "cat_anom_df": cat_anom_df,
@@ -852,6 +1023,7 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
         "c_sku_count": c_sku_count,
         "c_sku_share_pct": c_sku_share_pct,
         "dead_sku_count": dead_sku_count,
+        "dead_threshold": dead_threshold,
         "stockout_prevention_tl": stockout_prevention_tl,
         "top_city": top_city,
         "top_city_share": top_city_share,
@@ -861,13 +1033,9 @@ def compute_dynamic_metrics(sales_df: pd.DataFrame, prev_sales_df: pd.DataFrame,
 
 
 # -----------------------------------------------------------------------------
-# 5. İNTERAKTİF RAF-RADAR SOHBET ASİSTANI (CHATBOX MOTORU)
+# 6. İNTERAKTİF RAF-RADAR SOHBET ASİSTANI (SAĞ ALT YÜZEN CHATBOX + POPOVER)
 # -----------------------------------------------------------------------------
-def answer_executive_question(query: str, m: dict, start_str: str, end_str: str, selected_cat: str) -> str:
-    """
-    Yöneticinin sorduğu soruyu analiz eder ve seçili tarih/kategori filtresindeki
-    gerçek hesaplanmış metriklerle yanıt üretir (rafradar-versiyon2.html chatbox mantığı).
-    """
+def answer_executive_question(query: str, m: dict, sel_lbl: str, comp_lbl: str, selected_cat: str) -> str:
     q = query.lower().strip()
     total_opp = (
         m["vip_recovery_potential_tl"]
@@ -878,113 +1046,98 @@ def answer_executive_question(query: str, m: dict, start_str: str, end_str: str,
     target_rev = m["net_rev"] + total_opp
 
     if any(k in q for k in ["ciro", "büyü", "kâr", "kar", "marj", "finans", "durum"]):
-        dir_txt = f"%{abs(m['rev_growth_pct']):.1f} büyüme" if m["rev_growth_pct"] >= 0 else f"%{abs(m['rev_growth_pct']):.1f} daralma"
+        dir_txt = f"%{abs(m['d_rev_chg']):.1f} artış" if m["d_rev_chg"] >= 0 else f"%{abs(m['d_rev_chg']):.1f} düşüş"
         return (
-            f"📊 **Finansal Özet ({start_str} – {end_str}):** Seçili dönemde **{fmt_int(m['total_invoices'])} fatura** "
-            f"üzerinden **{fmt_tl(m['net_rev'])} net ciro** ({dir_txt}) üretildi. Liste fiyatının %44'ü maliyet varsayımıyla "
-            f"**tahmini brüt kârımız {fmt_tl(m['est_profit'])} (%{m['profit_margin']:.1f} marj)** seviyesindedir."
+            f"📊 **Finansal Özet ({sel_lbl}):** Seçili dönemde **{fmt_int(m['total_invoices'])} sipariş** "
+            f"üzerinden **{fmt_tl(m['net_rev'])} net ciro** (günlük ort. **{fmt_tl(m['d_net_rev'], 1)}**, karşılaştırma dönemine göre {dir_txt}) üretildi. "
+            f"**Tahmini brüt kârımız {fmt_tl(m['est_profit'])} (%{m['profit_margin']:.1f} marj)** seviyesindedir."
         )
 
     if any(k in q for k in ["iskonto", "indirim", "kaçak", "anomali", "şüpheli", "fiyat"]):
         top_cats = ", ".join(m["cat_anom_df"].head(3)["Category"].tolist()) if not m["cat_anom_df"].empty else "Sözlük ve Roman"
         return (
-            f"🏷️ **İskonto & Kaçak Denetimi:** Seçili dönemde ortalama iskonto oranı **%{m['avg_discount']:.1f}**'dir. "
-            f"Ancak **{fmt_int(m['suspicious_orders_count'])} sipariş satırında** kendi kategori medyanının 10+ puan "
-            f"üzerinde indirim verilerek **{fmt_tl(m['discount_leak_tl'])}** kâr sızıntısı oluşmuştur. En çok sapma görülen "
-            f"kategoriler: **{top_cats}**."
+            f"🏷️ **İndirim & Kaçak Denetimi:** Seçili dönemde ortalama indirim oranı **%{m['avg_discount']:.1f}**'dir. "
+            f"**{fmt_int(m['suspicious_orders_count'])} satırda** kategori medyanının 10+ puan üzerinde indirim verilerek "
+            f"**{fmt_tl(m['discount_leak_tl'])}** fazla indirim (kâr kaçağı) oluşmuştur. En çok sapma olan kategoriler: **{top_cats}**."
         )
 
     if any(k in q for k in ["vip", "müşteri", "bayi", "kayıp", "churn", "risk", "pasif"]):
         risk_ex = m["top_risk_examples"]
         ex_names = ", ".join([f"{r['CustomerID']} ({fmt_tl(r['Revenue'], 0)})" for _, r in risk_ex.iterrows()]) if not risk_ex.empty else "üst segment bayiler"
         return (
-            f"🚨 **Bayi & Kayıp Riski (Churn) Durumu:** Toplam **{fmt_int(m['active_customers'])} aktif bayinin** "
-            f"sadece **%{m['vip_cust_share_pct']:.1f}'i ({m['vip_cust_count']} VIP bayi)** cironun %80'ini üretiyor. "
-            f"Başta **{ex_names}** olmak üzere **{m['at_risk_vip_count']} yüksek cirolu bayi** uzun süredir sipariş vermedi. "
-            f"Bu bayilerin geri kazanımı **+{fmt_tl(m['vip_recovery_potential_tl'])}** ek ciro potansiyeli taşır."
+            f"🚨 **Müşteri & Kayıp Riski Durumu:** Seçili dönemde **{fmt_int(m['active_customers'])} aktif müşterinin** "
+            f"**%{m['vip_cust_share_pct']:.1f}'i ({m['vip_cust_count']} A sınıfı müşteri)** cironun %80'ini üretiyor. "
+            f"Başta **{ex_names}** olmak üzere **{m['at_risk_vip_count']} önemli bayi** uzun süredir sipariş vermedi "
+            f"(geri kazanım potansiyeli: **+{fmt_tl(m['vip_recovery_potential_tl'])}**)."
         )
 
     if any(k in q for k in ["pareto", "80/20", "yoğunlaşma", "bağımlılık", "portföy", "abc"]):
         return (
-            f"⚖️ **Çift Taraflı Pareto (80/20) Riski:** Cironun %80'i müşterilerin yalnızca **%{m['vip_cust_share_pct']:.1f}'ine "
-            f"({m['vip_cust_count']} bayi)** ve kitapların **%{m['a_sku_share_pct']:.1f}'ine ({fmt_int(m['a_sku_count'])} A sınıfı SKU)** "
-            f"bağımlıdır. İlk 10 bayi tek başına cironun **%{m['top10_cust_rev_share']:.1f}**'ini oluşturmaktadır."
+            f"⚖️ **Portföy & Pareto (80/20) Yapısı:** Cironun %80'i müşterilerin **%{m['vip_cust_share_pct']:.1f}'ine "
+            f"({m['vip_cust_count']} müşteri)** ve ürünlerin **%{m['a_sku_share_pct']:.1f}'ine ({fmt_int(m['a_sku_count'])} A sınıfı ürün)** "
+            f"bağımlıdır. İlk 10 müşteri tek başına cironun **%{m['top10_cust_rev_share']:.1f}**'ini oluşturmaktadır."
         )
 
     if any(k in q for k in ["stok", "tedarik", "ölü", "hareketsiz", "kitap", "ürün", "sku"]):
         return (
-            f"📦 **Stok ve Ürün Portföyü:** Seçili dönemde **{fmt_int(m['active_skus'])} farklı kitap (SKU)** satıldı. "
-            f"Cironun %80'ini çeken **{fmt_int(m['a_sku_count'])} A sınıfı yıldız kitapta** sıfır stoksuzluk politikası "
-            f"(+{fmt_tl(m['stockout_prevention_tl'])} koruma) uygulanmalı; **120+ gündür satılmayan {fmt_int(m['dead_sku_count'])} "
-            f"hareketsiz SKU** ise paket kampanyalarla eritilmelidir."
+            f"📦 **Stok ve Ürün Portföyü:** Seçili dönemde **{fmt_int(m['active_skus'])} farklı ürün** satıldı. "
+            f"Cironun %80'ini çeken **{fmt_int(m['a_sku_count'])} A sınıfı üründe** sıfır stoksuzluk (+{fmt_tl(m['stockout_prevention_tl'])} koruma) "
+            f"hedeflenmeli; **{m['dead_threshold']}+ gündür satılmayan {fmt_int(m['dead_sku_count'])} ürün** paket kampanyalarla eritilmelidir."
         )
 
     if any(k in q for k in ["aksiyon", "ne yapmalı", "karar", "plan", "fırsat", "potansiyel", "30 gün"]):
         return (
-            f"🎯 **30 Günlük Yönetim Aksiyon Özeti:** 4 ana sızıntı kapatıldığında mevcut ciroya **+{fmt_tl(total_opp)}** "
-            f"eklenerek **{fmt_tl(target_rev)}** seviyesine ulaşılabilir:\n"
-            f"1. **VIP Bayi Geri Kazanım Aramaları:** +{fmt_tl(m['vip_recovery_potential_tl'])}\n"
-            f"2. **A Sınıfı Yıldız Kitap Stok Koruması:** +{fmt_tl(m['stockout_prevention_tl'])}\n"
-            f"3. **Tek Siparişli Bayilere 2. Sipariş Teklifi:** +{fmt_tl(m['retention_potential_tl'])}\n"
-            f"4. **Kategori İskonto Tavanı (+5 Puan Onay Şartı):** +{fmt_tl(m['discount_leak_tl'])}"
+            f"🎯 **Önümüzdeki 30 Gün İçin 4 Aksiyon Özeti:** Toplam **+{fmt_tl(total_opp)}** ek potansiyel mevcuttur:\n"
+            f"1. **Geciken VIP Müşteri Aramaları:** +{fmt_tl(m['vip_recovery_potential_tl'])}\n"
+            f"2. **A Sınıfı Yıldız Ürün Stok Koruması:** +{fmt_tl(m['stockout_prevention_tl'])}\n"
+            f"3. **Tek Siparişli Müşterilere 2. Sipariş Teklifi:** +{fmt_tl(m['retention_potential_tl'])}\n"
+            f"4. **Kategori İndirim Tavanı (+5 Puan Onay Şartı):** +{fmt_tl(m['discount_leak_tl'])}"
         )
 
     if any(k in q for k in ["şehir", "il", "bölge", "kategori", "en çok"]):
         return (
-            f"🏙️ **Bölge ve Kategori Lideri:** Seçilen dönemde en yüksek ciro üreten il **{m['top_city']}** "
-            f"(toplam cironun **%{m['top_city_share']:.1f}**'i), lider ürün kategorisi ise **{m['top_cat_name']}** "
+            f"🏙️ **İl ve Kategori Lideri:** Seçili dönemde en yüksek ciro getiren il **{m['top_city']}** "
+            f"(cironun **%{m['top_city_share']:.1f}**'i), lider kategori ise **{m['top_cat_name']}** "
             f"(cironun **%{m['top_cat_share']:.1f}**'i) olmuştur."
         )
 
-    if any(k in q for k in ["veri", "kalite", "temiz", "maliyet", "formül", "nasıl hesap"]):
-        return (
-            "🔬 **Veri Kalitesi ve Metodoloji:** Ham veride `C` ile başlayan veya negatif miktarlı iade satırları ayrıştırıldı. "
-            "Yayınevi alış maliyeti veride bulunmadığı için sektör standardı olan **Liste Fiyatının %44'ü** kabul edildi. "
-            "İskonto kaçağı ise her kategorinin kendi **medyan (ortanca)** iskontosundan +10 puan sapan işlemlerden hesaplandı."
-        )
-
     return (
-        f"💡 **Seçili Dönem Özeti ({start_str} – {end_str} | {selected_cat}):** Net ciro **{fmt_tl(m['net_rev'])}**, "
-        f"tahmini brüt kâr **{fmt_tl(m['est_profit'])} (%{m['profit_margin']:.1f} marj)**, aktif bayi **{fmt_int(m['active_customers'])}** "
-        f"ve 4 aksiyondan toplam erişilebilir fırsat **+{fmt_tl(total_opp)}**'dir. *Ciro, iskonto kaçağı, VIP bayiler, "
-        f"stok/Pareto veya 30 günlük aksiyon planı* hakkında soru sorabilirsiniz."
+        f"💡 **Dönem Özeti ({sel_lbl}):** Net ciro **{fmt_tl(m['net_rev'])}** (günlük ort. **{fmt_tl(m['d_net_rev'], 1)}**), "
+        f"tahmini brüt kâr **{fmt_tl(m['est_profit'])} (%{m['profit_margin']:.1f} marj)**, aktif müşteri **{fmt_int(m['active_customers'])}** "
+        f"ve 4 aksiyondan toplam erişilebilir fırsat **+{fmt_tl(total_opp)}**'dir."
     )
 
 
-def render_floating_and_inline_chatbox(m: dict, start_str: str, end_str: str, selected_cat: str):
-    """
-    rafradar-versiyon2.html dosyasındaki interaktif sohbet asistanını (hazır soru chip'leri +
-    serbest soru sorma + canlı veri yanıtları) sunar.
-    """
+def render_chatbox_widgets(m: dict, sel_lbl: str, comp_lbl: str, selected_cat: str):
+    """Hem üst başlık sağında interaktif popover hem de sağ altta yüzen yeşil sohbet balonu (#chatwrap) çizer."""
     if "rafradar_chat_history" not in st.session_state:
         st.session_state["rafradar_chat_history"] = [
             {
                 "role": "assistant",
                 "text": (
-                    f"Merhaba! Ben **RafRadar Yönetici Asistanı**. Seçtiğiniz **{start_str} – {end_str}** dönemi "
-                    f"ve **{selected_cat}** verilerini analiz ettim. Aşağıdaki hazır sorulardan birine tıklayabilir "
-                    f"veya merak ettiğiniz soruyu doğrudan yazabilirsiniz."
+                    f"Merhaba! Seçtiğiniz **{sel_lbl}** dönemi (karşılaştırma: **{comp_lbl}**) verilerini analiz ettim. "
+                    f"Hazır sorulardan birine tıklayabilir veya sorunuzu aşağıya yazabilirsiniz."
                 ),
             }
         ]
 
-    with st.popover("💬 RafRadar Asistanı'na Sor", use_container_width=True):
+    with st.popover("💬 RafRadar Asistanı", use_container_width=True):
         render_html(
-            """
+            f"""
             <div style="background:#1f2a44; color:#fff; padding:10px 14px; border-radius:10px; margin-bottom:10px;">
-                <div style="font-family:'Poppins',sans-serif; font-weight:600; font-size:14px;">💬 RafRadar Akıllı Yönetici Asistanı</div>
-                <div style="font-size:11.5px; color:#d6ece5;">Seçili tarih ve kategori filtresine göre anlık yanıt verir</div>
+                <div style="font-family:'Poppins',sans-serif; font-weight:600; font-size:14px;">💬 RafRadar Yönetici Asistanı</div>
+                <div style="font-size:11px; color:#d6ece5;">Seçili dönem: {sel_lbl}</div>
             </div>
             """
         )
 
         quick_questions = [
             ("📈 Ciro & Kâr Durumu", "Ciro ve kâr marjımız ne durumda?"),
-            ("🚨 Riskteki VIP Bayiler", "Hangi VIP bayiler kayıp riskinde?"),
-            ("🏷️ İskonto Kaçağı", "İskonto kaçağı ne kadar ve hangi kategorilerde?"),
-            ("⚖️ Pareto 80/20 Riski", "Müşteri ve ürün Pareto bağımlılık riski nedir?"),
-            ("🎯 30 Günlük Aksiyonlar", "Bu hafta hangi 4 aksiyonu almalıyız?"),
-            ("🔬 Veri & Hesaplama", "Veriler nasıl temizlendi ve maliyet nasıl hesaplandı?"),
+            ("🚨 Geciken VIP Müşteriler", "Hangi VIP bayiler kayıp riskinde?"),
+            ("🏷️ Fazla İndirim Kaçağı", "İskonto kaçağı ne kadar ve hangi kategorilerde?"),
+            ("⚖️ Portföy & Pareto Riski", "Müşteri ve ürün Pareto bağımlılık riski nedir?"),
+            ("🎯 30 Günlük Aksiyon Planı", "Bu hafta hangi 4 aksiyonu almalıyız?"),
+            ("🏙️ Lider İl & Kategori", "Hangi il ve kategori en çok satıyor?"),
         ]
 
         q_cols = st.columns(2)
@@ -994,27 +1147,26 @@ def render_floating_and_inline_chatbox(m: dict, start_str: str, end_str: str, se
                 if st.button(btn_label, key=f"rr_quick_q_{idx}", use_container_width=True):
                     triggered_q = full_q
 
-        user_input = st.chat_input("Yönetici sorunuzu yazın (örn: iskonto kaçağı, vip bayi, stok)...", key="rr_chat_inp")
+        user_input = st.chat_input("Sorunuzu yazın (örn: ciro, indirim kaçağı, vip, stok)...", key="rr_chat_inp")
         active_query = triggered_q or user_input
 
         if active_query:
-            reply = answer_executive_question(active_query, m, start_str, end_str, selected_cat)
+            reply = answer_executive_question(active_query, m, sel_lbl, comp_lbl, selected_cat)
             st.session_state["rafradar_chat_history"].append({"role": "user", "text": active_query})
             st.session_state["rafradar_chat_history"].append({"role": "assistant", "text": reply})
 
-        # Son mesajları göster
         for msg in st.session_state["rafradar_chat_history"][-6:]:
             if msg["role"] == "user":
                 render_html(
                     f"""
-                    <div style="background:#ece7dd; color:#1f2a44; padding:8px 12px; border-radius:10px 10px 2px 10px; margin:6px 0 4px auto; max-width:88%; font-size:12px; font-weight:600;">
+                    <div style="background:#ece7dd; color:#1f2a44; padding:7px 11px; border-radius:10px 10px 2px 10px; margin:5px 0 3px auto; max-width:88%; font-size:12px; font-weight:600;">
                         👤 {msg['text']}
                     </div>
                     """
                 )
             else:
                 st.markdown(
-                    f"<div style='background:#faf7f2; border:1px solid #e4dfd6; border-left:3px solid #3d9a84; padding:9px 12px; border-radius:4px 10px 10px 10px; margin:4px 0 8px 0; font-size:12.5px; color:#1f2a44; line-height:1.45;'>{msg['text']}</div>",
+                    f"<div style='background:#faf7f2; border:1px solid #e4dfd6; border-left:3px solid #3d9a84; padding:8px 11px; border-radius:4px 10px 10px 10px; margin:3px 0 7px 0; font-size:12px; color:#1f2a44; line-height:1.45;'>{msg['text']}</div>",
                     unsafe_allow_html=True,
                 )
 
@@ -1023,13 +1175,13 @@ def render_floating_and_inline_chatbox(m: dict, start_str: str, end_str: str, se
                 st.session_state["rafradar_chat_history"] = st.session_state["rafradar_chat_history"][:1]
                 st.rerun()
 
-    # Ayrıca rafradar-versiyon2.html'deki sağ altta yüzen yuvarlak yeşil sohbet balonu (#chatwrap / .cwb)
-    q1_ans = answer_executive_question("ciro ve kâr", m, start_str, end_str, selected_cat)
-    q2_ans = answer_executive_question("vip müşteri risk", m, start_str, end_str, selected_cat)
-    q3_ans = answer_executive_question("iskonto kaçağı", m, start_str, end_str, selected_cat)
-    q4_ans = answer_executive_question("pareto 80/20", m, start_str, end_str, selected_cat)
-    q5_ans = answer_executive_question("aksiyon planı", m, start_str, end_str, selected_cat)
-    q6_ans = answer_executive_question("şehir ve kategori", m, start_str, end_str, selected_cat)
+    # Sağ altta yüzen yuvarlak yeşil sohbet ikonu (#chatwrap / .cwb)
+    q1_ans = answer_executive_question("ciro ve kâr", m, sel_lbl, comp_lbl, selected_cat)
+    q2_ans = answer_executive_question("vip müşteri risk", m, sel_lbl, comp_lbl, selected_cat)
+    q3_ans = answer_executive_question("iskonto kaçağı", m, sel_lbl, comp_lbl, selected_cat)
+    q4_ans = answer_executive_question("pareto 80/20", m, sel_lbl, comp_lbl, selected_cat)
+    q5_ans = answer_executive_question("aksiyon planı", m, sel_lbl, comp_lbl, selected_cat)
+    q6_ans = answer_executive_question("şehir ve kategori", m, sel_lbl, comp_lbl, selected_cat)
 
     render_html(
         f"""
@@ -1043,27 +1195,27 @@ def render_floating_and_inline_chatbox(m: dict, start_str: str, end_str: str, se
                 <div style="background:#1f2a44; color:#fff; padding:10px 12px; border-radius:10px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
                     <div>
                         <div style="font-family:'Poppins',sans-serif; font-weight:600; font-size:13.5px;">💬 RafRadar Asistan</div>
-                        <div style="font-size:11px; color:#d6ece5;">Seçili dönem: {start_str} – {end_str}</div>
+                        <div style="font-size:11px; color:#d6ece5;">Seçili: {sel_lbl}</div>
                     </div>
-                    <span class="rr-pill mint" style="font-size:10px;">Canlı Veri</span>
+                    <span class="pill" style="background:#d6ece5; color:#14513f;">Canlı</span>
                 </div>
                 <div style="font-size:11.5px; color:#5b6475; margin-bottom:8px;">
-                    Bir soruya tıklayın; yanıtlar seçtiğiniz tarih ve kategori filtresine göre anında hesaplanır:
+                    Soruya tıklayın; yanıtlar sol menüdeki seçili tarih aralığına göre anında güncellenir:
                 </div>
                 <details class="rr-qa-chip" open>
                     <summary><span>📈 Ciro ve kâr marjımız ne durumda?</span><span>▾</span></summary>
                     <div class="rr-qa-ans">{q1_ans}</div>
                 </details>
                 <details class="rr-qa-chip">
-                    <summary><span>🚨 Hangi VIP bayiler siparişi kesti?</span><span>▾</span></summary>
+                    <summary><span>🚨 Hangi VIP müşteriler siparişi kesti?</span><span>▾</span></summary>
                     <div class="rr-qa-ans">{q2_ans}</div>
                 </details>
                 <details class="rr-qa-chip">
-                    <summary><span>🏷️ İskonto kaçağı ne kadar ve nerede?</span><span>▾</span></summary>
+                    <summary><span>🏷️ Fazla indirim kaçağı ne kadar?</span><span>▾</span></summary>
                     <div class="rr-qa-ans">{q3_ans}</div>
                 </details>
                 <details class="rr-qa-chip">
-                    <summary><span>⚖️ Çift taraflı Pareto (80/20) riski nedir?</span><span>▾</span></summary>
+                    <summary><span>⚖️ Portföy &amp; Pareto (80/20) riski nedir?</span><span>▾</span></summary>
                     <div class="rr-qa-ans">{q4_ans}</div>
                 </details>
                 <details class="rr-qa-chip">
@@ -1074,9 +1226,6 @@ def render_floating_and_inline_chatbox(m: dict, start_str: str, end_str: str, se
                     <summary><span>🏙️ Hangi il ve kategori lider?</span><span>▾</span></summary>
                     <div class="rr-qa-ans">{q6_ans}</div>
                 </details>
-                <div style="font-size:11px; color:#5b6475; margin-top:8px; text-align:center;">
-                    Serbest metin soru yazmak için sağ üstteki <b>"💬 RafRadar Asistanı'na Sor"</b> penceresini de kullanabilirsiniz.
-                </div>
             </div>
         </details>
         """
@@ -1084,9 +1233,9 @@ def render_floating_and_inline_chatbox(m: dict, start_str: str, end_str: str, se
 
 
 # -----------------------------------------------------------------------------
-# 6. ANA RENDER FONKSİYONU (RAF-RADAR V2 TEMASI + DİNAMİK YÖNETİCİ ÖZETİ)
+# 7. ANA RENDER FONKSİYONU (SOL MENÜ + ÜST BAR + YÖNETİCİ ÖZETİ & VERİ KALİTESİ)
 # -----------------------------------------------------------------------------
-def render_executive_summary(filtered_df=None, raw_df=None):
+def render_executive_summary(filtered_df=None, raw_df=None, external_filters: dict = None):
     inject_rafradar_v2_css()
 
     full_raw_df = raw_df if (raw_df is not None and not raw_df.empty) else load_rafradar_data()
@@ -1098,255 +1247,166 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         full_raw_df = load_rafradar_data()
 
     valid_all_df = full_raw_df[~full_raw_df["IsReturn"]].copy()
-    global_min_date = valid_all_df["Date"].min()
-    global_max_date = valid_all_df["Date"].max()
-    available_years = sorted(valid_all_df["Year"].unique().tolist(), reverse=True)
 
-    # -------------------------------------------------------------------------
-    # ÜST NAVİGASYON, DİNAMİK FİLTRE ÇUBUĞU VE SOHBET ASİSTANI
-    # -------------------------------------------------------------------------
-    top_c1, top_c2, top_c3, top_c4, top_c5, top_c6 = st.columns([1.6, 2.5, 1.6, 1.8, 1.6, 1.5])
-
-    with top_c1:
-        render_html(
-            """
-            <div style="display:flex; align-items:center; gap:8px; padding-top:4px;">
-                <svg width="28" height="26" viewBox="0 0 28 26" aria-hidden="true">
-                    <rect x="2" y="10" width="6" height="14" rx="1.5" fill="#1f2a44"/>
-                    <rect x="11" y="3" width="6" height="21" rx="1.5" fill="#3d9a84"/>
-                    <rect x="20" y="14" width="6" height="10" rx="1.5" fill="#e0a526"/>
-                </svg>
-                <div>
-                    <div style="font-family:'Poppins',sans-serif; font-weight:700; font-size:20px; color:#1f2a44; line-height:1.1;">RafRadar</div>
-                    <div style="font-size:11px; color:#5b6475; font-weight:500;">Karar Destek Sistemi</div>
-                </div>
-            </div>
-            """
-        )
-
-    with top_c2:
-        selected_tab = st.radio(
-            "Görünüm Seçimi",
-            ["🏛️ Yönetici Özeti", "🛠️ Veri Kalitesi & Metodoloji"],
-            horizontal=True,
-            key="rafradar_main_tab",
-        )
-
-    with top_c3:
-        period_options = (
-            ["Tüm Veri Seti", "Son 12 Ay", "Son 6 Ay", "Son Çeyrek (90 Gün)", "Yoğun Sezon (Eyl-Ara)", "Özel Tarih Aralığı"]
-            + [f"Yıl: {y}" for y in available_years]
-        )
-        selected_preset = st.selectbox("📅 Dönem", period_options, index=0, key="rafradar_preset")
-
-    max_dt_ts = pd.to_datetime(global_max_date)
-    if selected_preset == "Tüm Veri Seti":
-        def_start, def_end = global_min_date, global_max_date
-    elif selected_preset == "Son 12 Ay":
-        def_start = max(global_min_date, (max_dt_ts - pd.Timedelta(days=365)).date())
-        def_end = global_max_date
-    elif selected_preset == "Son 6 Ay":
-        def_start = max(global_min_date, (max_dt_ts - pd.Timedelta(days=180)).date())
-        def_end = global_max_date
-    elif selected_preset == "Son Çeyrek (90 Gün)":
-        def_start = max(global_min_date, (max_dt_ts - pd.Timedelta(days=90)).date())
-        def_end = global_max_date
-    elif selected_preset == "Yoğun Sezon (Eyl-Ara)":
-        def_start, def_end = global_min_date, global_max_date
-    elif selected_preset.startswith("Yıl: "):
-        yr = int(selected_preset.replace("Yıl: ", ""))
-        yr_df = valid_all_df[valid_all_df["Year"] == yr]
-        def_start, def_end = yr_df["Date"].min(), yr_df["Date"].max()
+    # Sol kenar çubuğunu (rafradar-versiyon2.html #side) oluştur veya dışarıdan gelen filtreyi kullan
+    if external_filters is not None:
+        nav = external_filters
     else:
-        def_start, def_end = global_min_date, global_max_date
+        nav = render_rafradar_sidebar(valid_all_df, show_page_nav=True)
 
-    with top_c4:
-        custom_dates = st.date_input(
-            "📆 Tarih Seçimi",
-            value=(def_start, def_end),
-            min_value=global_min_date,
-            max_value=global_max_date,
-            key=f"rafradar_dates_{selected_preset}",
-        )
-        if isinstance(custom_dates, (list, tuple)) and len(custom_dates) == 2:
-            start_date, end_date = custom_dates[0], custom_dates[1]
-        else:
-            start_date, end_date = def_start, def_end
+    fa, fb = nav["fa"], nav["fb"]
+    fca, fcb = nav["fca"], nav["fcb"]
+    selected_cat = nav.get("category", "Tüm Kategoriler")
+    selected_page = nav.get("page", "Yönetici Özeti")
 
-    with top_c5:
-        top_cats = (
-            valid_all_df.groupby("Category")["TotalAmount"]
-            .sum()
-            .nlargest(25)
-            .index.tolist()
-        )
-        selected_cat = st.selectbox(
-            "📚 Kategori",
-            ["Tüm Kategoriler"] + top_cats,
-            index=0,
-            key="rafradar_cat",
-        )
+    s_days = max(1, (fb - fa).days + 1)
+    c_days = max(1, (fcb - fca).days + 1)
 
-    # Filtreleri Veriye Uygula
-    scope_sales_df = valid_all_df[
-        (valid_all_df["Date"] >= start_date) & (valid_all_df["Date"] <= end_date)
-    ].copy()
-    scope_raw_df = full_raw_df[
-        (full_raw_df["Date"] >= start_date) & (full_raw_df["Date"] <= end_date)
-    ].copy()
-
-    if selected_preset == "Yoğun Sezon (Eyl-Ara)":
-        scope_sales_df = scope_sales_df[scope_sales_df["Month"].isin([9, 10, 11, 12])]
-        scope_raw_df = scope_raw_df[scope_raw_df["Month"].isin([9, 10, 11, 12])]
+    scope_sales_df = valid_all_df[(valid_all_df["Date"] >= fa) & (valid_all_df["Date"] <= fb)].copy()
+    comp_sales_df = valid_all_df[(valid_all_df["Date"] >= fca) & (valid_all_df["Date"] <= fcb)].copy()
+    scope_raw_df = full_raw_df[(full_raw_df["Date"] >= fa) & (full_raw_df["Date"] <= fb)].copy()
 
     if selected_cat != "Tüm Kategoriler":
         scope_sales_df = scope_sales_df[scope_sales_df["Category"] == selected_cat]
+        comp_sales_df = comp_sales_df[comp_sales_df["Category"] == selected_cat]
         scope_raw_df = scope_raw_df[scope_raw_df["Category"] == selected_cat]
 
     if scope_sales_df.empty:
-        st.warning("Seçilen tarih aralığı ve kategori için satış kaydı bulunamadı. Lütfen tarih aralığını genişletin.")
+        st.warning("Seçilen tarih aralığı ve kategori için satış kaydı bulunamadı. Lütfen sol menüden tarih aralığını genişletin.")
         return
 
-    span_days = max(1, (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1)
-    prev_end = (pd.to_datetime(start_date) - pd.Timedelta(days=1)).date()
-    prev_start = (pd.to_datetime(prev_end) - pd.Timedelta(days=span_days)).date()
+    m = compute_dynamic_metrics(scope_sales_df, comp_sales_df, scope_raw_df, s_days, c_days)
+    sel_lbl = fmt_range_tr(fa, fb)
+    comp_lbl = fmt_range_tr(fca, fcb)
 
-    prev_sales_df = valid_all_df[
-        (valid_all_df["Date"] >= prev_start) & (valid_all_df["Date"] <= prev_end)
-    ].copy()
-    if selected_cat != "Tüm Kategoriler":
-        prev_sales_df = prev_sales_df[prev_sales_df["Category"] == selected_cat]
-
-    if prev_sales_df.empty and len(scope_sales_df) > 10:
-        mid_ts = scope_sales_df["InvoiceDate"].min() + (scope_sales_df["InvoiceDate"].max() - scope_sales_df["InvoiceDate"].min()) / 2
-        prev_sales_df = scope_sales_df[scope_sales_df["InvoiceDate"] < mid_ts].copy()
-        curr_half_df = scope_sales_df[scope_sales_df["InvoiceDate"] >= mid_ts].copy()
-        m = compute_dynamic_metrics(scope_sales_df, prev_sales_df, scope_raw_df)
-        first_half_rev = prev_sales_df["TotalAmount"].sum()
-        second_half_rev = curr_half_df["TotalAmount"].sum()
-        m["rev_growth_pct"] = ((second_half_rev - first_half_rev) / first_half_rev * 100.0) if first_half_rev > 0 else 0.0
-        m["cust_diff"] = curr_half_df["CustomerID"].nunique() - prev_sales_df["CustomerID"].nunique()
-        comparison_label = "Dönemin İlk Yarısına Göre"
-    else:
-        m = compute_dynamic_metrics(scope_sales_df, prev_sales_df, scope_raw_df)
-        comparison_label = "Önceki Eşdeğer Döneme Göre"
-
-    start_str = pd.to_datetime(start_date).strftime("%d.%m.%Y")
-    end_str = pd.to_datetime(end_date).strftime("%d.%m.%Y")
-
-    # Sağ üst sütunda İnteraktif Chatbox Popover Butonu
-    with top_c6:
-        st.markdown("<div style='padding-top:18px;'></div>", unsafe_allow_html=True)
-        render_floating_and_inline_chatbox(m, start_str, end_str, selected_cat)
+    # Üst Başlık ve Sağ Üstte Hızlı Görünüm Geçişi + Sohbet Asistanı
+    hdr_left, hdr_mid, hdr_right = st.columns([5.2, 3.0, 1.8])
+    with hdr_mid:
+        active_subview = st.radio(
+            "Görünüm",
+            ["🏛️ Yönetici Özeti", "🛠️ Veri Kalitesi"],
+            index=0 if selected_page != "Veri Kalitesi" else 1,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="rr_top_subview",
+        )
+    with hdr_right:
+        render_chatbox_widgets(m, sel_lbl, comp_lbl, selected_cat)
 
     # =========================================================================
-    # SEKME 1: YÖNETİCİ ÖZETİ (RAF-RADAR V2 GÖRSEL DİLİ + BİZİM KURGUMUZ)
+    # GÖRÜNÜM 1: YÖNETİCİ ÖZETİ (rafradar-versiyon2.html Üst Bar + Bizim Kurgumuz)
     # =========================================================================
-    if selected_tab == "🏛️ Yönetici Özeti":
+    if active_subview == "🏛️ Yönetici Özeti":
+        with hdr_left:
+            render_html(
+                """
+                <header class="rr-header">
+                    <div>
+                        <h1>Yönetici Özeti</h1>
+                        <p>Seçtiğim dönem yılın neresinde, kârlılığımız güvende mi ve önümüzdeki 30 günde ne yapmalıyız?</p>
+                    </div>
+                </header>
+                """
+            )
+
+        # rafradar-versiyon2.html pills() satırı (Her sayfada aynı olan seçili vs karşılaştırma bandı)
+        cat_pill_html = (
+            f'<span class="pill" style="background:#dbe5f8;color:#1f2a44;">Kategori: {selected_cat}</span>'
+            if selected_cat != "Tüm Kategoriler"
+            else ""
+        )
         render_html(
             f"""
-            <div class="rr-page-header">
-                <h1>Yönetici Özeti</h1>
-                <p>Şirket büyüyor mu, kârlılığımız güvende mi ve önümüzdeki 30 günde hangi kritik aksiyonları almalıyız?</p>
-            </div>
-            <div class="rr-pill-row">
-                <span class="rr-pill mint">Seçili: {start_str} – {end_str} · {span_days} gün</span>
-                <span style="font-size:12px; color:#5b6475;">karşılaştırma</span>
-                <span class="rr-pill stone">{comparison_label}</span>
-                <span class="rr-pill stone">Kategori: {selected_cat}</span>
-                <span class="rr-pill Gold">{fmt_int(len(scope_sales_df))} işlem satırı · {fmt_int(m['total_invoices'])} sipariş</span>
+            <section class="rr-pills">
+                <span class="pill" style="background:#d6ece5;color:#14513f;">Seçili: {sel_lbl} · {s_days} gün</span>
+                <span style="font-size:12px;color:#5b6475;">karşılaştırma</span>
+                <span class="pill" style="background:#ece7dd;color:#1f2a44;">{comp_lbl} · {c_days} gün</span>
+                {cat_pill_html}
+            </section>
+            """
+        )
+
+        # ---------------------------------------------------------------------
+        # ÜST 5'Lİ KPI KARTLARI (rafradar-versiyon2.html kcard() formatı:
+        # Üstte Seçili Dönem Toplamı + % Değişim | Kesikli Çizgi | Altta Günlük Ort. + % Değişim)
+        # ---------------------------------------------------------------------
+        k1, k2, k3, k4, k5 = st.columns(5)
+
+        with k1:
+            render_kcard(
+                label="Net ciro",
+                main_val=fmt_tl(m["net_rev"]),
+                main_chg_html=chg_badge_html(m["rev_chg"]),
+                sub_label="Günlük ort.",
+                sub_val=fmt_tl(m["d_net_rev"], 1),
+                sub_chg_html=chg_badge_html(m["d_rev_chg"]),
+                top_color="#3d9a84",
+            )
+
+        with k2:
+            render_kcard(
+                label="Tahmini brüt kâr",
+                main_val=fmt_tl(m["est_profit"]),
+                main_chg_html=f'<span class="chg pos">%{m["profit_margin"]:.1f} marj</span>',
+                sub_label="Günlük ort.",
+                sub_val=fmt_tl(m["d_profit"], 1),
+                sub_chg_html=chg_badge_html(m["d_profit_chg"]),
+                top_color="#e0a526",
+            )
+
+        with k3:
+            render_kcard(
+                label="Aktif müşteri & Pareto",
+                main_val=fmt_int(m["active_customers"]),
+                main_chg_html=chg_badge_html(m["cust_chg"]),
+                sub_label="Pareto payı",
+                sub_val=f"%{m['vip_cust_share_pct']:.1f} bayi",
+                sub_chg_html='<span class="chg mute">= %80 Ciro</span>',
+                top_color="#3b6fd1",
+            )
+
+        with k4:
+            disc_pts_str = f"{m['disc_diff_pts']:+.1f} puan".replace(".", ",")
+            disc_cls = "neg" if m["disc_diff_pts"] > 0.5 else ("pos" if m["disc_diff_pts"] < -0.5 else "mute")
+            render_kcard(
+                label="Ort. indirim & kaçak",
+                main_val=f"%{m['avg_discount']:.1f}".replace(".", ","),
+                main_chg_html=f'<span class="chg {disc_cls}">{disc_pts_str}</span>',
+                sub_label="Fazla indirim",
+                sub_val=fmt_tl(m["discount_leak_tl"], 1),
+                sub_chg_html=f'<span class="chg neg">{fmt_int(m["suspicious_orders_count"])} satır</span>',
+                top_color="#d0574f",
+            )
+
+        with k5:
+            render_kcard(
+                label="Aktif ürün & satışsız",
+                main_val=fmt_int(m["active_skus"]),
+                main_chg_html=chg_badge_html(m["sku_chg"]),
+                sub_label=f"{m['dead_threshold']}+ gün pasif",
+                sub_val=f"{fmt_int(m['dead_sku_count'])} ürün",
+                sub_chg_html='<span class="chg neg">eritilmeli</span>',
+                top_color="#1f2a44",
+            )
+
+        render_html(
+            """
+            <div class="rr-note">
+                Tüm göstergeler, sızıntı köprüsü, Pareto dağılımı ve 30 günlük aksiyon planı sol menüde seçtiğin
+                <b>Seçili dönem</b> ve <b>Karşılaştırma dönemi</b> tarihlerine göre canlı hesaplanır.
             </div>
             """
         )
 
         # ---------------------------------------------------------------------
-        # ÜST KPI KARTLARI (5 SÜTUN - RAF-RADAR V2 .kpi STİLİ)
-        # ---------------------------------------------------------------------
-        k1, k2, k3, k4, k5 = st.columns(5)
-
-        rev_delta_cls = "kpi-delta-pos" if m["rev_growth_pct"] >= 0 else "kpi-delta-neg"
-        rev_arrow = "▲" if m["rev_growth_pct"] >= 0 else "▼"
-        daily_rev = m["net_rev"] / max(1, span_days)
-
-        with k1:
-            render_html(
-                f"""
-                <div class="kpi-card">
-                    <div class="kpi-label">Seçili Dönem Net Ciro</div>
-                    <div class="kpi-value">{fmt_tl(m['net_rev'])}</div>
-                    <span class="{rev_delta_cls}">{rev_arrow} %{abs(m['rev_growth_pct']):.1f}</span>
-                    <div class="kpi-rule"></div>
-                    <div class="kpi-label">Günlük ort.: <b style="color:#1f2a44;">{fmt_tl(daily_rev, 1)}</b></div>
-                </div>
-                """
-            )
-
-        with k2:
-            margin_cls = "kpi-delta-pos" if m["profit_margin"] >= 28.0 else "kpi-delta-warn"
-            render_html(
-                f"""
-                <div class="kpi-card gold">
-                    <div class="kpi-label">Tahmini Brüt Kâr & Marj</div>
-                    <div class="kpi-value">{fmt_tl(m['est_profit'])}</div>
-                    <span class="{margin_cls}">%{m['profit_margin']:.1f} Marj</span>
-                    <div class="kpi-rule"></div>
-                    <div class="kpi-label">Maliyet varsayımı: <b style="color:#1f2a44;">Liste %44'ü</b></div>
-                </div>
-                """
-            )
-
-        with k3:
-            cust_sign = "+" if m["cust_diff"] >= 0 else ""
-            cust_cls = "kpi-delta-pos" if m["cust_diff"] >= 0 else "kpi-delta-warn"
-            render_html(
-                f"""
-                <div class="kpi-card blue">
-                    <div class="kpi-label">Aktif Müşteri & Pareto</div>
-                    <div class="kpi-value">{fmt_int(m['active_customers'])}</div>
-                    <span class="{cust_cls}">{cust_sign}{m['cust_diff']} net bayi</span>
-                    <div class="kpi-rule"></div>
-                    <div class="kpi-label">Pareto: <b style="color:#1f2a44;">%{m['vip_cust_share_pct']:.1f}'i = %80 Ciro</b></div>
-                </div>
-                """
-            )
-
-        with k4:
-            render_html(
-                f"""
-                <div class="kpi-card coral">
-                    <div class="kpi-label">Ort. İskonto & Norm Dışı Kaçak</div>
-                    <div class="kpi-value">%{m['avg_discount']:.1f}</div>
-                    <span class="kpi-delta-neg">{fmt_tl(m['discount_leak_tl'], 1)} kaçak</span>
-                    <div class="kpi-rule"></div>
-                    <div class="kpi-label">Sapmalı: <b style="color:#8f2a24;">{fmt_int(m['suspicious_orders_count'])} satır</b></div>
-                </div>
-                """
-            )
-
-        with k5:
-            render_html(
-                f"""
-                <div class="kpi-card navy">
-                    <div class="kpi-label">Aktif Ürün (SKU) & Satışsız</div>
-                    <div class="kpi-value">{fmt_int(m['active_skus'])}</div>
-                    <span class="kpi-delta-warn">{fmt_int(m['dead_sku_count'])} Hareketsiz</span>
-                    <div class="kpi-rule"></div>
-                    <div class="kpi-label">Durum: <b style="color:#1f2a44;">120+ gün satışsız</b></div>
-                </div>
-                """
-            )
-
-        st.write("")
-
-        # ---------------------------------------------------------------------
         # ORTA BÖLÜM:
-        # [1] FİNANSAL PERFORMANS & İSKONTO DİSİPLİNİ
+        # [1] FİNANSAL PERFORMANS & İNDİRİM DİSİPLİNİ
         # [2] CİRO & KÂR SIZINTISI KÖPRÜSÜ (WATERFALL ŞELALE GRAFİĞİ)
         # ---------------------------------------------------------------------
-        col_left, col_right = st.columns([5.6, 4.4])
+        col_left, col_right = st.columns([5.5, 4.5])
 
         with col_left:
-            if span_days <= 62:
+            if s_days <= 62:
                 ts_df = (
                     scope_sales_df.groupby("Date", as_index=False)
                     .agg(NetRev=("TotalAmount", "sum"), GrossRev=("GrossAmount", "sum"))
@@ -1370,7 +1430,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
 
             rev_thresh = ts_df["NetRev"].quantile(0.68) if len(ts_df) > 3 else ts_df["NetRev"].mean()
-            # rafradar-versiyon2.html renkleri: zirve aylar #3d9a84 (teal), diğer aylar #cfc9bd (stone)
             bar_colors = ["#3d9a84" if v >= rev_thresh else "#cfc9bd" for v in ts_df["NetRev"]]
 
             peak_row = ts_df.loc[ts_df["NetRev"].idxmax()]
@@ -1389,12 +1448,12 @@ def render_executive_summary(filtered_df=None, raw_df=None):
 
             render_html(
                 f"""
-                <div class="section-card teal-left">
-                    <h2 class="rr-h2"><span class="rr-num">1</span>Finansal performans ve iskonto disiplini</h2>
-                    <p class="rr-sub">Çubuk: net ciro (₺) · çizgi: ortalama indirim oranı (%) · yeşil çubuklar en yoğun talep dönemleri</p>
+                <div class="card" style="border-left:4px solid #3d9a84; margin-bottom:10px;">
+                    <h2 class="h"><span class="num">1</span>Finansal performans ve indirim disiplini</h2>
+                    <p class="sub">Seçili dönem ({sel_lbl}) · çubuk: net ciro · sarı çizgi: ortalama indirim oranı (%)</p>
                     <div class="section-takeaway">
                         Zirve dönem ({peak_row['Label']}) ile en düşük dönem arasında {peak_to_low_ratio:.1f} kat ciro farkı var;
-                        ancak talebin en yüksek olduğu {period_unit_name} bile iskonto oranı (%{peak_disc_avg:.1f}) düşmüyor.
+                        ancak talebin en yüksek olduğu {period_unit_name} bile indirim oranı (%{peak_disc_avg:.1f}) düşmüyor.
                     </div>
                 </div>
                 """
@@ -1419,7 +1478,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     y=ts_df["DiscPct"],
                     name="İndirim Oranı (%)",
                     mode="lines+markers",
-                    line=dict(color="#e0a526", width=3),
+                    line=dict(color="#e0a526", width=2.8),
                     marker=dict(size=7, color="#e0a526", line=dict(color="#fff", width=1)),
                     hovertemplate="<b>%{x}</b><br>İndirim Oranı: %%{y:.1f}<extra></extra>",
                 ),
@@ -1428,7 +1487,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             disc_min = max(0, float(ts_df["DiscPct"].min()) - 8)
             disc_max = min(85, float(ts_df["DiscPct"].max()) + 8)
             fig1.update_layout(
-                height=285,
+                height=280,
                 margin=dict(l=10, r=10, t=16, b=10),
                 paper_bgcolor="#ffffff",
                 plot_bgcolor="#ffffff",
@@ -1455,7 +1514,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 <div class="insight-box">
                     <b>Stratejik Çıkarım:</b> Yeşil çubuklarla vurgulanan yüksek talep dönemlerinde organik sipariş güçlü iken
                     indirimin <b>%{peak_disc_avg:.1f}</b> seviyesinde sabit kalması gereksiz marj kaybı yaratıyor.
-                    Ayrıca haftalık cironun <b>%{top_dow_share:.1f}'i {top_dow_tr}</b> gününe yığılarak depo darboğazı oluşturuyor.
+                    Ayrıca seçili dönemde cironun <b>%{top_dow_share:.1f}'i {top_dow_tr}</b> gününe yığılıyor.
                 </div>
                 """
             )
@@ -1472,11 +1531,11 @@ def render_executive_summary(filtered_df=None, raw_df=None):
 
             render_html(
                 f"""
-                <div class="section-card gold-left">
-                    <h2 class="rr-h2"><span class="rr-num">2</span>Ciro ve kâr sızıntısı köprüsü (fırsat havuzu)</h2>
-                    <p class="rr-sub">Mevcut cirodan 4 operasyonel sızıntının kapatılmasıyla ulaşılabilir potansiyel ciroya geçiş</p>
+                <div class="card" style="border-left:4px solid #e0a526; margin-bottom:10px;">
+                    <h2 class="h"><span class="num">2</span>Ciro ve kâr sızıntısı köprüsü (fırsat havuzu)</h2>
+                    <p class="sub">Seçili dönem cirosu + 4 operasyonel sızıntının kapatılmasıyla ulaşılabilir potansiyel</p>
                     <div class="section-takeaway">
-                        4 sızıntı kapatıldığında mevcut ciroya +{fmt_tl(total_opportunity_tl)}
+                        4 sızıntı kapatıldığında seçili dönem cirosuna +{fmt_tl(total_opportunity_tl)}
                         (+%{uplift_pct:.1f}) eklenerek {fmt_tl(target_rev_tl)} seviyesine çıkılabilir.
                     </div>
                 </div>
@@ -1484,12 +1543,12 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
 
             wf_x = [
-                "Mevcut<br>Net Ciro",
+                "Seçili<br>Net Ciro",
                 "+ Pasif VIP<br>Kazanımı",
                 "+ Yıldız Stok<br>Koruması",
                 "+ 2. Sipariş<br>Tekrarı",
-                "+ İskonto<br>Kontrolü",
-                "Aksiyonlarla<br>Hedef Ciro",
+                "+ İndirim<br>Kontrolü",
+                "Aksiyonlarla<br>Potansiyel",
             ]
             wf_y = [
                 m["net_rev"],
@@ -1523,7 +1582,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 )
             )
             fig2.update_layout(
-                height=240,
+                height=235,
                 margin=dict(l=10, r=10, t=20, b=10),
                 paper_bgcolor="#ffffff",
                 plot_bgcolor="#ffffff",
@@ -1542,31 +1601,31 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 <div class="leak-grid">
                     <div class="leak-item">
                         <div class="leak-item-title">
-                            <span>🔴 1. Pasif VIP Bayiler</span>
+                            <span>🔴 1. Pasif VIP Müşteriler</span>
                             <span style="color:#14513f;">+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item-desc">Siparişi kesen <b>{m['at_risk_vip_count']} büyük bayinin</b> geri kazanım etkisi.</div>
+                        <div class="leak-item-desc">Siparişi geciken <b>{m['at_risk_vip_count']} büyük bayinin</b> geri kazanım etkisi.</div>
                     </div>
                     <div class="leak-item">
                         <div class="leak-item-title">
                             <span>📦 2. Yıldız Ürün Stoğu</span>
                             <span style="color:#14513f;">+{fmt_tl(m['stockout_prevention_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item-desc">Cironun %80'ini çeken <b>{m['a_sku_count']} A sınıfı kitapta</b> yok satmayı önleme.</div>
+                        <div class="leak-item-desc">Cironun %80'ini çeken <b>{m['a_sku_count']} A sınıfı üründe</b> yok satmayı önleme.</div>
                     </div>
                     <div class="leak-item">
                         <div class="leak-item-title">
                             <span>🔄 3. Tek Siparişli Bayiler</span>
                             <span style="color:#14513f;">+{fmt_tl(m['retention_potential_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item-desc">Tek alımda kalan <b>%{m['one_time_ratio_pct']:.0f} bayinin</b> çeyreğine 2. sipariş yaptırma.</div>
+                        <div class="leak-item-desc">Tek alımda kalan <b>%{m['one_time_ratio_pct']:.0f} müşterinin</b> çeyreğine 2. sipariş yaptırma.</div>
                     </div>
                     <div class="leak-item">
                         <div class="leak-item-title">
-                            <span>🏷️ 4. Aşırı İskonto Tavanı</span>
+                            <span>🏷️ 4. Fazla İndirim Tavanı</span>
                             <span style="color:#14513f;">+{fmt_tl(m['discount_leak_tl'], 1)}</span>
                         </div>
-                        <div class="leak-item-desc">Kategori normunu aşan <b>{fmt_int(m['suspicious_orders_count'])} satırdaki</b> fazladan indirimi kesme.</div>
+                        <div class="leak-item-desc">Kategori medyanını aşan <b>{fmt_int(m['suspicious_orders_count'])} satırdaki</b> kaçağı kesme.</div>
                     </div>
                 </div>
                 """
@@ -1574,8 +1633,8 @@ def render_executive_summary(filtered_df=None, raw_df=None):
 
         # ---------------------------------------------------------------------
         # ALT BÖLÜM:
-        # [3] PORTFÖY YAPISI VE ÇİFT TARAFLI PARETO (80/20) BAĞIMLILIK RİSKİ
-        # [4] YÖNETİM KURULU 30 GÜNLÜK AKSİYON PLANI
+        # [3] PORTFÖY YAPISI VE ÇİFT TARAFLI YOĞUNLAŞMA (PARETO 80/20)
+        # [4] ÖNÜMÜZDEKİ 30 GÜN İÇİN YÖNETİM AKSİYON PLANI
         # ---------------------------------------------------------------------
         col_b1, col_b2 = st.columns([4.4, 5.6])
 
@@ -1593,12 +1652,12 @@ def render_executive_summary(filtered_df=None, raw_df=None):
 
             render_html(
                 f"""
-                <div class="section-card">
-                    <h2 class="rr-h2"><span class="rr-num">3</span>Portföy yapısı ve çift taraflı yoğunlaşma (Pareto riski)</h2>
-                    <p class="rr-sub">Müşteri ve ürünler ciro payına göre A (%80 Ciro) · B (%15 Ciro) · C (%5 Ciro)</p>
+                <div class="card" style="margin-bottom:10px;">
+                    <h2 class="h"><span class="num">3</span>Portföy yapısı ve çift taraflı yoğunlaşma (Pareto)</h2>
+                    <p class="sub">Seçili dönemde müşteri ve ürünler ciro payına göre A (%80) · B (%15) · C (%5)</p>
                     <div class="section-takeaway">
-                        Müşterilerin %{m['vip_cust_share_pct']:.1f}'i ({m['vip_cust_count']} bayi) ve ürünlerin
-                        %{m['a_sku_share_pct']:.1f}'i ({fmt_int(m['a_sku_count'])} kitap) toplam cironun %80'ini getiriyor.
+                        Müşterilerin %{m['vip_cust_share_pct']:.1f}'i ({m['vip_cust_count']} müşteri) ve ürünlerin
+                        %{m['a_sku_share_pct']:.1f}'i ({fmt_int(m['a_sku_count'])} ürün) cironun %80'ini getiriyor.
                     </div>
                 </div>
                 """
@@ -1609,35 +1668,26 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 render_html(
                     f"""
                     <div class="pareto-box">
-                        <div class="pareto-title">
-                            <span>👥 Müşteriler · {fmt_int(m['active_customers'])}</span>
-                            <span class="rr-pill mint">İlk 10 = %{m['top10_cust_rev_share']:.0f} Ciro</span>
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                            <span style="font-size:12.5px; font-weight:600;">Müşteriler · {fmt_int(m['active_customers'])}</span>
+                            <span class="pill" style="background:#d6ece5; color:#14513f;">İlk 10 = %{m['top10_cust_rev_share']:.0f} Ciro</span>
                         </div>
-                        <div class="abc-stack-bar" title="Müşteri adet dağılımı: A, B, C">
+                        <div class="abc-stack-bar">
                             <div style="flex:{max(1, m['vip_cust_count'])} 1 0; background:#3d9a84; color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;">A</div>
                             <div style="flex:{max(1, b_cust_count)} 1 0; background:#e0a526; color:#1f2a44; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;">B</div>
                             <div style="flex:{max(1, c_cust_count)} 1 0; background:#d9622b; color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;">C</div>
                         </div>
-                        <div class="pareto-sub">A: {m['vip_cust_count']} · B: {b_cust_count} · C: {c_cust_count} bayi</div>
+                        <div style="font-size:11px; color:#5b6475; margin-bottom:8px;">A {m['vip_cust_count']} · B {b_cust_count} · C {c_cust_count} müşteri</div>
                         <div class="tier-row">
-                            <div class="tier-header">
-                                <span>🏆 A · VIP Bayiler (%{m['vip_cust_share_pct']:.0f} bayi)</span>
-                                <span style="color:#14513f;">%80 Ciro</span>
-                            </div>
+                            <div class="tier-header"><span>A · VIP (%{m['vip_cust_share_pct']:.0f} müşteri)</span><span style="color:#14513f;">%80 Ciro</span></div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:80%; background:#3d9a84;"></div></div>
                         </div>
                         <div class="tier-row">
-                            <div class="tier-header">
-                                <span>🤝 B · Orta Segment (%{b_cust_share:.0f} bayi)</span>
-                                <span style="color:#7a5600;">%15 Ciro</span>
-                            </div>
+                            <div class="tier-header"><span>B · Orta (%{b_cust_share:.0f} müşteri)</span><span style="color:#7a5600;">%15 Ciro</span></div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:15%; background:#e0a526;"></div></div>
                         </div>
                         <div class="tier-row" style="margin-bottom:0;">
-                            <div class="tier-header">
-                                <span>🌱 C · Küçük Alıcılar (%{c_cust_share:.0f} bayi)</span>
-                                <span style="color:#8f2a24;">%5 Ciro</span>
-                            </div>
+                            <div class="tier-header"><span>C · Küçük (%{c_cust_share:.0f} müşteri)</span><span style="color:#8f2a24;">%5 Ciro</span></div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:5%; background:#d9622b;"></div></div>
                         </div>
                     </div>
@@ -1648,35 +1698,26 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 render_html(
                     f"""
                     <div class="pareto-box">
-                        <div class="pareto-title">
-                            <span>📚 Ürünler · {fmt_int(m['active_skus'])}</span>
-                            <span class="rr-pill Gold">C Sınıfı = %{m['c_sku_share_pct']:.0f} SKU</span>
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                            <span style="font-size:12.5px; font-weight:600;">Ürünler · {fmt_int(m['active_skus'])}</span>
+                            <span class="pill" style="background:#fdf0cf; color:#7a5600;">C = %{m['c_sku_share_pct']:.0f} ürün</span>
                         </div>
-                        <div class="abc-stack-bar" title="Ürün adet dağılımı: A, B, C">
+                        <div class="abc-stack-bar">
                             <div style="flex:{max(1, m['a_sku_count'])} 1 0; background:#3d9a84; color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;">A</div>
                             <div style="flex:{max(1, b_sku_count)} 1 0; background:#e0a526; color:#1f2a44; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;">B</div>
                             <div style="flex:{max(1, m['c_sku_count'])} 1 0; background:#d9622b; color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;">C</div>
                         </div>
-                        <div class="pareto-sub">A: {fmt_int(m['a_sku_count'])} · B: {fmt_int(b_sku_count)} · C: {fmt_int(m['c_sku_count'])} ürün</div>
+                        <div style="font-size:11px; color:#5b6475; margin-bottom:8px;">A {fmt_int(m['a_sku_count'])} · B {fmt_int(b_sku_count)} · C {fmt_int(m['c_sku_count'])} ürün</div>
                         <div class="tier-row">
-                            <div class="tier-header">
-                                <span>⭐ A · Yıldız Kitaplar (%{m['a_sku_share_pct']:.0f} SKU)</span>
-                                <span style="color:#14513f;">%80 Ciro</span>
-                            </div>
+                            <div class="tier-header"><span>A · Yıldız (%{m['a_sku_share_pct']:.0f} ürün)</span><span style="color:#14513f;">%80 Ciro</span></div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:80%; background:#3d9a84;"></div></div>
                         </div>
                         <div class="tier-row">
-                            <div class="tier-header">
-                                <span>📘 B · Düzenli Kitaplar (%{b_sku_share:.0f} SKU)</span>
-                                <span style="color:#7a5600;">%15 Ciro</span>
-                            </div>
+                            <div class="tier-header"><span>B · Düzenli (%{b_sku_share:.0f} ürün)</span><span style="color:#7a5600;">%15 Ciro</span></div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:15%; background:#e0a526;"></div></div>
                         </div>
                         <div class="tier-row" style="margin-bottom:0;">
-                            <div class="tier-header">
-                                <span>📦 C · Uzun Kuyruk (%{m['c_sku_share_pct']:.0f} SKU)</span>
-                                <span style="color:#8f2a24;">%5 Ciro</span>
-                            </div>
+                            <div class="tier-header"><span>C · Uzun Kuyruk (%{m['c_sku_share_pct']:.0f} ürün)</span><span style="color:#8f2a24;">%5 Ciro</span></div>
                             <div class="tier-bar-bg"><div class="tier-bar-fill" style="width:5%; background:#d9622b;"></div></div>
                         </div>
                     </div>
@@ -1733,94 +1774,96 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 vip_str = (
                     f"Başta <b>{risk_ex.iloc[0]['CustomerID']}</b> ({fmt_tl(risk_ex.iloc[0]['Revenue'], 0)}) ve "
                     f"<b>{risk_ex.iloc[1]['CustomerID']}</b> ({fmt_tl(risk_ex.iloc[1]['Revenue'], 0)}) olmak üzere "
-                    f"toplam <b>{m['at_risk_vip_count']} yüksek cirolu bayi</b> uzun süredir sipariş vermedi."
+                    f"toplam <b>{m['at_risk_vip_count']} yüksek cirolu müşteri</b> uzun süredir sipariş vermedi."
                 )
             elif len(risk_ex) == 1:
                 vip_str = (
                     f"<b>{risk_ex.iloc[0]['CustomerID']}</b> ({fmt_tl(risk_ex.iloc[0]['Revenue'], 0)}) dahil "
-                    f"<b>{m['at_risk_vip_count']} önemli bayi</b> siparişlerini durdurdu."
+                    f"<b>{m['at_risk_vip_count']} önemli müşteri</b> siparişlerini durdurdu."
                 )
             else:
-                vip_str = "Üst segment bayilerde sipariş aralığı açılan müşteriler tespit edildi."
+                vip_str = "Üst segment müşterilerde sipariş aralığı açılan bayiler tespit edildi."
 
             top_anom_cats = m["cat_anom_df"].head(2)["Category"].tolist()
             anom_cat_str = " ve ".join(top_anom_cats) if top_anom_cats else "Sözlük ve Roman"
 
             render_html(
                 f"""
-                <div class="section-card gold-left">
-                    <h2 class="rr-h2"><span class="rr-num">4</span>Önümüzdeki 30 gün için yönetim aksiyon planı</h2>
-                    <p class="rr-sub">Seçilen dönem verilerinden süzülen, departmanlar arası en yüksek geri dönüşlü 4 somut karar</p>
-                    <div class="action-card urgent">
-                        <div class="action-top">
-                            <div class="action-dept-group">
-                                <span class="action-dept-pill">Pazarlama</span>
-                                <span class="action-dept-pill">Satış</span>
+                <div class="card" style="border-left:4px solid #e0a526;">
+                    <h2 class="h"><span class="num">4</span>Önümüzdeki 30 gün için yönetim aksiyon planı</h2>
+                    <p class="sub">Seçilen dönem ({sel_lbl}) verilerinden süzülen, en yüksek geri dönüşlü 4 somut karar</p>
+                    <div style="margin-top:10px;">
+                        <div class="action-card urgent">
+                            <div class="action-top">
+                                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Pazarlama</span>
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Satış</span>
+                                </div>
+                                <span class="pill neg">KRİTİK · Bu Hafta</span>
                             </div>
-                            <span class="rr-pill rose">KRİTİK · Bu Hafta</span>
-                        </div>
-                        <div class="action-headline">1. Siparişi Kesen VIP Bayiler İçin Birebir Geri Kazanım Aramaları</div>
-                        <div class="action-body">
-                            <b>Kök Sorun:</b> {vip_str}<br>
-                            <b>Somut Aksiyon:</b> Müşteri temsilcileri bu hafta pasif VIP bayileri doğrudan arayarak özel vade veya sepet hedefi tanımlamalı.
-                        </div>
-                        <div class="action-footer">
-                            <span style="color:#5b6475;">Beklenen Ciro Koruma Etkisi:</span>
-                            <span class="action-impact" style="color:#8f2a24;">+{fmt_tl(m['vip_recovery_potential_tl'])}</span>
-                        </div>
-                    </div>
-                    <div class="action-card high">
-                        <div class="action-top">
-                            <div class="action-dept-group">
-                                <span class="action-dept-pill">Satış & Fiyat</span>
-                                <span class="action-dept-pill">Finans</span>
+                            <div class="action-headline">1. Siparişi Geciken VIP Müşteriler İçin Birebir Geri Kazanım Aramaları</div>
+                            <div class="action-body">
+                                <b>Tespit Edilen Kök Sorun:</b> {vip_str}<br>
+                                <b>Önerilen Aksiyon:</b> Müşteri temsilcileri bu hafta pasif VIP bayileri doğrudan arayarak özel vade veya sepet hedefi tanımlamalı.
                             </div>
-                            <span class="rr-pill rose">KRİTİK · Bu Hafta</span>
-                        </div>
-                        <div class="action-headline">2. Kategori Normunu Aşan İskontolara Otomatik Tavan Getirilmesi</div>
-                        <div class="action-body">
-                            <b>Kök Sorun:</b> Başta <b>{anom_cat_str}</b> olmak üzere {fmt_int(m['suspicious_orders_count'])} satırda kategori medyanından 10+ puan fazla indirim verilmiş.<br>
-                            <b>Somut Aksiyon:</b> ERP'de kategori medyan iskontosunu +5 puandan fazla aşan siparişlere yönetici onay şartı getirilmeli.
-                        </div>
-                        <div class="action-footer">
-                            <span style="color:#5b6475;">Doğrudan Net Kâr Koruma Etkisi:</span>
-                            <span class="action-impact" style="color:#7a5600;">+{fmt_tl(m['discount_leak_tl'])}</span>
-                        </div>
-                    </div>
-                    <div class="action-card medium">
-                        <div class="action-top">
-                            <div class="action-dept-group">
-                                <span class="action-dept-pill">Tedarik Zinciri</span>
-                                <span class="action-dept-pill">Depo</span>
+                            <div class="action-footer">
+                                <span style="color:#5b6475;">Beklenen Ciro Koruma Etkisi:</span>
+                                <span class="action-impact" style="color:#8f2a24;">+{fmt_tl(m['vip_recovery_potential_tl'])}</span>
                             </div>
-                            <span class="rr-pill Gold">YÜKSEK · 15 Gün</span>
                         </div>
-                        <div class="action-headline">3. A Sınıfı Yıldız Kitaplarda Emniyet Stoğu ve Hareketsiz Stok Eritme</div>
-                        <div class="action-body">
-                            <b>Kök Sorun:</b> Cironun %80'ini üreten <b>{fmt_int(m['a_sku_count'])} A sınıfı kitapta</b> stoksuzluk riski varken, <b>{fmt_int(m['dead_sku_count'])} kitap</b> 120+ gündür satılmıyor.<br>
-                            <b>Somut Aksiyon:</b> A sınıfı kitaplara %95 hizmet seviyesiyle güvenlik stoğu tanımlanmalı; satışsız ürünler çok satanlarla paketlenmeli.
-                        </div>
-                        <div class="action-footer">
-                            <span style="color:#5b6475;">Stoksuzluk Önleme & Nakit Etkisi:</span>
-                            <span class="action-impact" style="color:#14513f;">+{fmt_tl(m['stockout_prevention_tl'])}</span>
-                        </div>
-                    </div>
-                    <div class="action-card blue" style="margin-bottom:0;">
-                        <div class="action-top">
-                            <div class="action-dept-group">
-                                <span class="action-dept-pill">CRM</span>
-                                <span class="action-dept-pill">Pazarlama</span>
+                        <div class="action-card high">
+                            <div class="action-top">
+                                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Satış &amp; Fiyat</span>
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Finans</span>
+                                </div>
+                                <span class="pill neg">KRİTİK · Bu Hafta</span>
                             </div>
-                            <span class="rr-pill mint">PLANLI · 30 Gün</span>
+                            <div class="action-headline">2. Kategori Normunu Aşan İndirimlere Otomatik Tavan Getirilmesi</div>
+                            <div class="action-body">
+                                <b>Tespit Edilen Kök Sorun:</b> Başta <b>{anom_cat_str}</b> olmak üzere {fmt_int(m['suspicious_orders_count'])} satırda kategori medyanından 10+ puan fazla indirim verilmiş.<br>
+                                <b>Önerilen Aksiyon:</b> ERP'de kategori medyan indirimini +5 puandan fazla aşan siparişlere yönetici onay şartı getirilmeli.
+                            </div>
+                            <div class="action-footer">
+                                <span style="color:#5b6475;">Doğrudan Net Kâr Koruma Etkisi:</span>
+                                <span class="action-impact" style="color:#7a5600;">+{fmt_tl(m['discount_leak_tl'])}</span>
+                            </div>
                         </div>
-                        <div class="action-headline">4. Tek Siparişte Kalan Bayileri İkinci Siparişe Taşıyacak Paket Teklifi</div>
-                        <div class="action-body">
-                            <b>Kök Sorun:</b> Seçilen dönemde alım yapan bayilerin <b>%{m['one_time_ratio_pct']:.1f}'i ({fmt_int(m['one_time_count'])} bayi)</b> yalnız 1 kez sipariş verip bıraktı.<br>
-                            <b>Somut Aksiyon:</b> İlk faturadan 30 gün sonra bayinin aldığı kategoriyle en sık birlikte alınan ürünler için otomatik teklif gönderilmeli.
+                        <div class="action-card medium">
+                            <div class="action-top">
+                                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Tedarik Zinciri</span>
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Depo</span>
+                                </div>
+                                <span class="pill" style="background:#fdf0cf;color:#7a5600;">YÜKSEK · 15 Gün</span>
+                            </div>
+                            <div class="action-headline">3. A Sınıfı Yıldız Ürünlerde Güvenlik Stoğu ve Satışsız Ürün Eritme</div>
+                            <div class="action-body">
+                                <b>Tespit Edilen Kök Sorun:</b> Cironun %80'ini üreten <b>{fmt_int(m['a_sku_count'])} A sınıfı üründe</b> stoksuzluk riski varken, <b>{fmt_int(m['dead_sku_count'])} ürün</b> {m['dead_threshold']}+ gündür satılmıyor.<br>
+                                <b>Önerilen Aksiyon:</b> A sınıfı ürünlere %95 hizmet seviyesiyle güvenlik stoğu tanımlanmalı; satışsız ürünler çok satanlarla paketlenmeli.
+                            </div>
+                            <div class="action-footer">
+                                <span style="color:#5b6475;">Stoksuzluk Önleme &amp; Nakit Etkisi:</span>
+                                <span class="action-impact" style="color:#14513f;">+{fmt_tl(m['stockout_prevention_tl'])}</span>
+                            </div>
                         </div>
-                        <div class="action-footer">
-                            <span style="color:#5b6475;">Beklenen 2. Sipariş Kazanımı:</span>
-                            <span class="action-impact" style="color:#3b6fd1;">+{fmt_tl(m['retention_potential_tl'])}</span>
+                        <div class="action-card blue" style="margin-bottom:0;">
+                            <div class="action-top">
+                                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">CRM</span>
+                                    <span class="pill" style="background:#1f2a44;color:#fff;">Pazarlama</span>
+                                </div>
+                                <span class="pill pos">PLANLI · 30 Gün</span>
+                            </div>
+                            <div class="action-headline">4. Tek Siparişte Kalan Müşterileri İkinci Siparişe Taşıyacak Paket Teklifi</div>
+                            <div class="action-body">
+                                <b>Tespit Edilen Kök Sorun:</b> Seçili dönemde alım yapan müşterilerin <b>%{m['one_time_ratio_pct']:.1f}'i ({fmt_int(m['one_time_count'])} müşteri)</b> yalnız 1 kez sipariş verdi.<br>
+                                <b>Önerilen Aksiyon:</b> İlk faturadan 30 gün sonra müşterinin aldığı kategoriyle en sık birlikte alınan ürünler için otomatik teklif gönderilmeli.
+                            </div>
+                            <div class="action-footer">
+                                <span style="color:#5b6475;">Beklenen 2. Sipariş Kazanımı:</span>
+                                <span class="action-impact" style="color:#3b6fd1;">+{fmt_tl(m['retention_potential_tl'])}</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1828,7 +1871,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
 
     # =========================================================================
-    # SEKME 2: VERİ KALİTESİ & METODOLOJİ (RAF-RADAR V2 "kalite" GÖRSEL DİLİ)
+    # GÖRÜNÜM 2: VERİ KALİTESİ (rafradar-versiyon2.html Üst Bar + Veri Kalitesi)
     # =========================================================================
     else:
         total_raw_rows = len(scope_raw_df)
@@ -1837,104 +1880,109 @@ def render_executive_summary(filtered_df=None, raw_df=None):
         clean_ratio_pct = (clean_rows / max(1, total_raw_rows)) * 100.0
         return_amount_tl = abs(float(scope_raw_df.loc[scope_raw_df["IsReturn"], "TotalAmount"].sum()))
 
+        with hdr_left:
+            render_html(
+                """
+                <header class="rr-header">
+                    <div>
+                        <h1>Veri Kalitesi</h1>
+                        <p>Bu verilere ne kadar güvenebiliriz ve rakamlar nasıl hesaplandı?</p>
+                    </div>
+                </header>
+                """
+            )
+
         render_html(
             f"""
-            <div class="rr-page-header">
-                <h1>Veri Kalitesi &amp; Metodoloji</h1>
-                <p>Bu verilere ne kadar güvenebiliriz, ham veriden hangi bilgileri çıkardık ve rakamlar nasıl hesaplandı?</p>
-            </div>
-            <div class="rr-pill-row">
-                <span class="rr-pill mint">{fmt_int(clean_rows)} / {fmt_int(total_raw_rows)} satır net satışta kullanıldı · %{clean_ratio_pct:.2f}</span>
-                <span class="rr-pill stone">Dönem: {start_str} – {end_str}</span>
-                <span class="rr-pill stone">{fmt_int(m['total_invoices'])} sipariş · {fmt_int(m['active_customers'])} müşteri · {fmt_int(m['active_skus'])} ürün</span>
-            </div>
+            <section class="rr-pills">
+                <span class="pill pos">{fmt_int(clean_rows)} / {fmt_int(total_raw_rows)} satır kullanıldı · %{clean_ratio_pct:.2f}</span>
+                <span class="pill" style="background:#ece7dd;color:#1f2a44;">Seçili: {sel_lbl} · {s_days} gün</span>
+                <span class="pill" style="background:#ece7dd;color:#1f2a44;">{fmt_int(m['total_invoices'])} sipariş · {fmt_int(m['active_customers'])} müşteri</span>
+            </section>
             """
         )
 
-        # ---------------------------------------------------------------------
-        # 1. VERİ ÖN İŞLEME · 5 ADIM (rafradar-versiyon2.html kalite 1. Panel Stili)
-        # ---------------------------------------------------------------------
+        # 1. VERİ ÖN İŞLEME · 5 ADIM (rafradar-versiyon2.html kalite 1. Panel)
         render_html(
             f"""
-            <div class="section-card">
-                <h2 class="rr-h2"><span class="rr-num">1</span>Veri ön işleme · 5 adım</h2>
-                <p class="rr-sub">Ham Excel/Parquet dosyasından yönetici panellerine giden veri temizleme ve zenginleştirme hattı</p>
+            <div class="card" style="margin-bottom:14px;">
+                <h2 class="h"><span class="num">1</span>Veri ön işleme · 5 adım</h2>
+                <p class="sub">Ham dosyadan panellere giden yol · seçili dönem ({sel_lbl})</p>
                 <div class="vq-step-row">
                     <div class="vq-step" style="background:#d6ece5;">
                         <div class="vq-step-label">1 · YÜKLEME</div>
                         <div class="vq-step-val">{fmt_int(total_raw_rows)}</div>
-                        <div class="vq-step-desc">ham satır okundu · 10 sütun · Parquet önbellek ile 0,4 sn</div>
+                        <div class="vq-step-desc">satır okundu · 10 sütun · Parquet önbellek</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#fdf0cf;">
                         <div class="vq-step-label">2 · TEMİZLİK</div>
                         <div class="vq-step-val">−{fmt_int(return_rows)}</div>
-                        <div class="vq-step-desc">iptal ('C' kodlu), iade ve sıfır/negatif satır ayrıştırıldı ({fmt_tl(return_amount_tl, 1)})</div>
+                        <div class="vq-step-desc">iptal, iade ve sıfır/negatif satır çıkarıldı ({fmt_tl(return_amount_tl, 1)})</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#dbe5f8;">
                         <div class="vq-step-label">3 · HESAPLAMA</div>
                         <div class="vq-step-val">+12</div>
-                        <div class="vq-step-desc">yeni sütun: brüt ciro, net ciro, indirim %, tahmini maliyet ve brüt kâr</div>
+                        <div class="vq-step-desc">yeni sütun: brüt ciro, net ciro, indirim, tahmini kâr</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#fbe0d3;">
                         <div class="vq-step-label">4 · SEGMENTLEME</div>
                         <div class="vq-step-val">A · B · C</div>
-                        <div class="vq-step-desc">müşteri (RFM & Pareto) ve ürün ciro payına göre (%80 · %15 · %5) sınıflandı</div>
+                        <div class="vq-step-desc">müşteri ve ürün, ciro payına göre (%80 · %15 · %5)</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#fbe3e0;">
                         <div class="vq-step-label">5 · ANOMALİ DENETİMİ</div>
                         <div class="vq-step-val">{fmt_int(m['suspicious_orders_count'])}</div>
-                        <div class="vq-step-desc">sipariş satırı kategori medyanından fazla indirimli ({fmt_tl(m['discount_leak_tl'], 1)} kaçak)</div>
+                        <div class="vq-step-desc">sipariş satırı normdan fazla indirimli ({fmt_tl(m['discount_leak_tl'], 1)})</div>
                     </div>
                 </div>
             </div>
             """
         )
 
-        # ---------------------------------------------------------------------
-        # 2. ALAN DOLULUĞU & METRİK HESAPLAMA REHBERİ VE 3. ANOMALİ GRAFİĞİ
-        # ---------------------------------------------------------------------
-        col_f1, col_f2 = st.columns([5.5, 4.5])
+        col_f1, col_f2 = st.columns([5.4, 4.6])
 
         with col_f1:
             render_html(
                 """
-                <div class="section-card">
-                    <h2 class="rr-h2"><span class="rr-num">2</span>Veriden çıkarılan bilgiler ve hesaplama formülleri</h2>
-                    <p class="rr-sub">Yönetici özetindeki tüm göstergeler ham sütunlardan aşağıdaki matematiksel kurallarla canlı hesaplanır</p>
-                    <div class="formula-card">
-                        <div class="formula-title">1. Brüt Ciro, Net Ciro ve İndirim Oranı (%)</div>
-                        <div class="formula-code">Brüt Ciro = Quantity × UnitPrice &nbsp;|&nbsp; Net Ciro = Quantity × NetPrice</div>
-                        <div style="font-size:12px; color:#5b6475;">
-                            Liste fiyatı (<code>UnitPrice</code>) ile indirimli net fiyat (<code>NetPrice</code>) arasındaki farktan
-                            gerçekleşen indirim oranı hesaplanır: <b>İndirim (%) = ((Brüt − Net) / Brüt) × 100</b>.
+                <div class="card">
+                    <h2 class="h"><span class="num">2</span>Veriden çıkarılan bilgiler ve hesaplama kuralları</h2>
+                    <p class="sub">Yönetici özetindeki tüm göstergeler ham sütunlardan aşağıdaki kurallarla canlı hesaplanır</p>
+                    <div style="margin-top:10px;">
+                        <div class="formula-card">
+                            <div class="formula-title">1. Brüt Ciro, Net Ciro ve İndirim Oranı (%)</div>
+                            <div class="formula-code">Brüt Ciro = Quantity × UnitPrice &nbsp;|&nbsp; Net Ciro = Quantity × NetPrice</div>
+                            <div style="font-size:12px; color:#5b6475;">
+                                Liste fiyatı ile net fiyat arasındaki farktan gerçekleşen indirim oranı hesaplanır:
+                                <b>İndirim (%) = ((Brüt − Net) / Brüt) × 100</b>.
+                            </div>
                         </div>
-                    </div>
-                    <div class="formula-card">
-                        <div class="formula-title">2. Tahmini Brüt Kâr ve Marj (Maliyet Varsayımı)</div>
-                        <div class="formula-code">Tahmini Maliyet = 0,44 × Brüt Ciro &nbsp;|&nbsp; Brüt Kâr = Net Ciro − Tahmini Maliyet</div>
-                        <div style="font-size:12px; color:#5b6475;">
-                            Ham veride ürün alış maliyeti bulunmadığından sektör standardı olarak <b>Liste Fiyatının %44'ü</b>
-                            maliyet kabul edilmiş, kâr simülasyonları bu temel üzerine kurulmuştur.
+                        <div class="formula-card">
+                            <div class="formula-title">2. Tahmini Brüt Kâr ve Marj (Maliyet Varsayımı)</div>
+                            <div class="formula-code">Tahmini Maliyet = 0,44 × Brüt Ciro &nbsp;|&nbsp; Brüt Kâr = Net Ciro − Tahmini Maliyet</div>
+                            <div style="font-size:12px; color:#5b6475;">
+                                Veride alış maliyeti bulunmadığından sektör standardı olarak <b>Liste Fiyatının %44'ü</b>
+                                maliyet kabul edilmiş, kâr hesapları bu temel üzerine kurulmuştur.
+                            </div>
                         </div>
-                    </div>
-                    <div class="formula-card">
-                        <div class="formula-title">3. Norm Dışı İskonto Kaçağı (Fiyat Anomalisi)</div>
-                        <div class="formula-code">Fazla İndirim (₺) = Brüt Tutar × (Sipariş İndirimi % − Kategori Medyan İndirimi %)</div>
-                        <div style="font-size:12px; color:#5b6475;">
-                            Her ürün kategorisinin ortanca (medyan) indirimi bulunur. Kategori normundan <b>10+ puan</b>
-                            fazla indirim verilen siparişlerdeki ekstra kayıp "İskonto Kaçağı" olarak raporlanır.
+                        <div class="formula-card">
+                            <div class="formula-title">3. Norm Dışı İndirim Kaçağı (Anomali Taraması)</div>
+                            <div class="formula-code">Fazla İndirim (₺) = Brüt Tutar × (Sipariş İndirimi % − Kategori Medyan İndirimi %)</div>
+                            <div style="font-size:12px; color:#5b6475;">
+                                Her ürün kategorisinin ortanca (medyan) indirimi bulunur. Kategori normundan <b>10+ puan</b>
+                                fazla indirim verilen siparişlerdeki ekstra kayıp "Fazla İndirim Kaçağı" olarak raporlanır.
+                            </div>
                         </div>
-                    </div>
-                    <div class="formula-card" style="margin-bottom:0;">
-                        <div class="formula-title">4. Portföy (A·B·C), Geciken VIP Bayiler ve Güvenlik Stoğu</div>
-                        <div class="formula-code">Birikimli Ciro Payı ≤ %80 → A Sınıfı &nbsp;|&nbsp; Güvenlik Stoğu: SS = z · σ · √L</div>
-                        <div style="font-size:12px; color:#5b6475;">
-                            Müşteriler ve ürünler ciroya göre sıralandığında ilk %80'i getirenler <b>A sınıfı</b>, sonraki %15 <b>B sınıfı</b>,
-                            son %5 <b>C sınıfı</b> olur. Emniyet stoğu %95 hizmet seviyesi ($z=1,65$) ve tedarik süresi ($L$) ile modellenir.
+                        <div class="formula-card" style="margin-bottom:0;">
+                            <div class="formula-title">4. Portföy (A·B·C) ve Güvenlik Stoğu</div>
+                            <div class="formula-code">Birikimli Ciro Payı ≤ %80 → A Sınıfı &nbsp;|&nbsp; Güvenlik Stoğu: SS = z · σ · √L</div>
+                            <div style="font-size:12px; color:#5b6475;">
+                                Müşteriler ve ürünler ciroya göre sıralandığında ilk %80'i getirenler <b>A sınıfı</b>, sonraki %15 <b>B sınıfı</b>,
+                                son %5 <b>C sınıfı</b> olur. Güvenlik stoğu %95 hizmet seviyesi ($z=1,65$) ve tedarik süresi ($L$) ile hesaplanır.
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1942,19 +1990,51 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             )
 
         with col_f2:
+            # Alan Doluluğu (rafradar-versiyon2.html kalite 2. Panel SVG barlarıyla birebir)
             render_html(
                 """
-                <div class="section-card coral-left">
-                    <h2 class="rr-h2"><span class="rr-num">3</span>Kategori bazlı norm dışı indirim sapmaları</h2>
-                    <p class="rr-sub">Seçili dönemde kategori medyan indiriminin aşılmasıyla oluşan fazla indirim tutarları (₺)</p>
+                <div class="card" style="margin-bottom:14px;">
+                    <h2 class="h"><span class="num">3</span>Alan doluluğu</h2>
+                    <p class="sub">Her alanın yüzde kaçı dolu · sarı olanlar simülasyonla tamamlandı</p>
+                    <div style="margin-top:10px;">
+                        <div style="display:grid;grid-template-columns:150px 1fr 56px;gap:10px;align-items:center;padding:5px 0;">
+                            <span style="font-size:12.5px;">Sipariş &amp; Müşteri No</span>
+                            <svg viewBox="0 0 300 10" width="100%"><rect width="300" height="10" rx="5" fill="#efe9de"/><rect width="300" height="10" rx="5" fill="#3d9a84"/></svg>
+                            <b style="font-size:12px;text-align:right;">%100</b>
+                        </div>
+                        <div style="display:grid;grid-template-columns:150px 1fr 56px;gap:10px;align-items:center;padding:5px 0;">
+                            <span style="font-size:12.5px;">Tarih &amp; Kategori</span>
+                            <svg viewBox="0 0 300 10" width="100%"><rect width="300" height="10" rx="5" fill="#efe9de"/><rect width="300" height="10" rx="5" fill="#3d9a84"/></svg>
+                            <b style="font-size:12px;text-align:right;">%100</b>
+                        </div>
+                        <div style="display:grid;grid-template-columns:150px 1fr 56px;gap:10px;align-items:center;padding:5px 0;">
+                            <span style="font-size:12.5px;">Adet, Liste &amp; Net Fiyat</span>
+                            <svg viewBox="0 0 300 10" width="100%"><rect width="300" height="10" rx="5" fill="#efe9de"/><rect width="300" height="10" rx="5" fill="#3d9a84"/></svg>
+                            <b style="font-size:12px;text-align:right;">%100</b>
+                        </div>
+                        <div style="display:grid;grid-template-columns:150px 1fr 56px;gap:10px;align-items:center;padding:5px 0;">
+                            <span style="font-size:12.5px;">Alış Maliyeti (Liste %44)</span>
+                            <svg viewBox="0 0 300 10" width="100%"><rect width="300" height="10" rx="5" fill="#efe9de"/><rect width="300" height="10" rx="5" fill="#e0a526"/></svg>
+                            <b style="font-size:11px;text-align:right;color:#7a5600;">Varsayım</b>
+                        </div>
+                    </div>
                 </div>
                 """
             )
 
-            top_anom_df = m["cat_anom_df"].head(7).copy()
+            render_html(
+                """
+                <div class="card" style="border-left:4px solid #d0574f;">
+                    <h2 class="h"><span class="num">4</span>Kategori bazlı fazla indirim sapmaları</h2>
+                    <p class="sub">Seçili dönemde kategori medyan indiriminin aşılmasıyla oluşan fazla indirim tutarları (₺)</p>
+                </div>
+                """
+            )
+
+            top_anom_df = m["cat_anom_df"].head(6).copy()
             if not top_anom_df.empty and top_anom_df["LeakTL"].sum() > 0:
                 top_anom_df["Label"] = top_anom_df.apply(
-                    lambda r: f"{r['Category'][:22]} (Med %{r['MedianDisc']:.0f}→Max %{r['MaxDisc']:.0f})",
+                    lambda r: f"{r['Category'][:20]} (Med %{r['MedianDisc']:.0f}→Max %{r['MaxDisc']:.0f})",
                     axis=1,
                 )
                 fig_dq = go.Figure(
@@ -1969,7 +2049,7 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                     )
                 )
                 fig_dq.update_layout(
-                    height=245,
+                    height=220,
                     margin=dict(l=10, r=70, t=10, b=10),
                     paper_bgcolor="#ffffff",
                     plot_bgcolor="#ffffff",
@@ -1985,30 +2065,6 @@ def render_executive_summary(filtered_df=None, raw_df=None):
             else:
                 st.info("Seçilen dar filtrede belirgin bir kategori iskonto sapması bulunmadı.")
 
-            # Sütun Doluluk Karnesi (rafradar-versiyon2.html kalite 2. Panel)
-            render_html(
-                """
-                <div class="section-card" style="margin-top:8px;">
-                    <h2 class="rr-h2"><span class="rr-num">4</span>Veri alanı doluluk ve güvenilirlik karnesi</h2>
-                    <p class="rr-sub">Zorunlu sütunların doluluk oranı ve eksik veriler için uygulanan analitik çözümler</p>
-                    <div style="font-size:12px; display:flex; flex-direction:column; gap:6px; margin-top:8px;">
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span><b>Sipariş, Müşteri, Tarih, Kategori, Adet, Fiyat</b> (9 Sütun)</span>
-                            <span class="rr-pill mint">%100 Dolu · Tam Güvenilir</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span><b>Anlık Depo Stoğu &amp; Tedarik Süresi</b> (Veride Yok)</span>
-                            <span class="rr-pill Gold">Simüle Edildi (SS = z·σ·√L)</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span><b>Ürün Alış Maliyeti</b> (Veride Yok)</span>
-                            <span class="rr-pill Gold">Liste Fiyatının %44'ü Varsayıldı</span>
-                        </div>
-                    </div>
-                </div>
-                """
-            )
-
         with st.expander("🔍 İşlenmiş ve Zenginleştirilmiş Veri Seti Örneğini İncele (İlk 25 Satır)"):
             preview_cols = [
                 "InvoiceNo", "CustomerID", "InvoiceDate", "Category", "Description",
@@ -2020,17 +2076,17 @@ def render_executive_summary(filtered_df=None, raw_df=None):
                 scope_sales_df[existing_cols].head(25).rename(
                     columns={
                         "InvoiceNo": "Fatura No",
-                        "CustomerID": "Bayi ID",
+                        "CustomerID": "Müşteri No",
                         "InvoiceDate": "Tarih",
                         "Category": "Kategori",
-                        "Description": "Kitap Adı",
-                        "City": "Şehir",
+                        "Description": "Ürün Adı",
+                        "City": "İl",
                         "Quantity": "Adet",
                         "UnitPrice": "Liste Fiyatı (₺)",
                         "NetPrice": "Net Fiyat (₺)",
-                        "GrossAmount": "Brüt Tutar (₺)",
+                        "GrossAmount": "Brüt Ciro (₺)",
                         "TotalAmount": "Net Ciro (₺)",
-                        "DiscountPct": "İskonto (%)",
+                        "DiscountPct": "İndirim (%)",
                         "EstProfit": "Tahmini Kâr (₺)",
                     }
                 ),

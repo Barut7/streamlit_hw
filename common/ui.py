@@ -20,11 +20,11 @@ RENK = {
 AYLAR = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
 
 SAYFALAR_META = [
-    ("yonetici", "Yönetici Özeti", "#1f2a44", "🟦"),
-    ("satis", "Satış & Fiyat", "#3d9a84", "🟩"),
-    ("pazarlama", "Pazarlama & Müşteri", "#d9622b", "🟧"),
-    ("tedarik", "Tedarik Zinciri", "#3b6fd1", "🟦"),
-    ("kalite", "Veri Kalitesi", "#e0a526", "🟨"),
+    ("yonetici", "Yönetici Özeti", "#1f2a44", "🧭"),
+    ("satis", "Satış & Fiyat", "#3d9a84", "💰"),
+    ("pazarlama", "Pazarlama & Müşteri", "#d9622b", "🎯"),
+    ("tedarik", "Tedarik Zinciri", "#3b6fd1", "📦"),
+    ("kalite", "Veri Kalitesi", "#e0a526", "🔍"),
 ]
 
 ROLLER_META = [
@@ -128,31 +128,31 @@ def _inject_css(aktif_sayfa: str = ""):
         section[data-testid="stSidebar"] {{
             background-color: #faf7f2 !important;
             border-right: 1px solid #e4dfd6 !important;
-            min-width: 245px !important;
-            max-width: 265px !important;
+            min-width: 268px !important;
+            max-width: 282px !important;
         }}
         section[data-testid="stSidebar"] .block-container {{
-            padding: 1.1rem 0.95rem 1.5rem 0.95rem !important;
+            padding: 1.1rem 0.9rem 1.5rem 0.9rem !important;
         }}
-        /* Sol menüdeki sayfa butonları (RafRadar_dashboard.html .nav görünümü) */
+        /* Sol menüdeki sayfa butonları (büyütülmüş punto ve temsili ikonlar) */
         section[data-testid="stSidebar"] div.stButton > button {{
             width: 100%;
             text-align: left !important;
             justify-content: flex-start !important;
-            padding: 7px 10px !important;
-            min-height: 36px !important;
-            border-radius: 8px !important;
+            padding: 8px 11px !important;
+            min-height: 40px !important;
+            border-radius: 9px !important;
             border: 1px solid transparent !important;
             background: transparent !important;
             color: #1f2a44 !important;
             font-family: 'Inter', sans-serif !important;
-            font-size: 13px !important;
+            font-size: 14.5px !important;
             font-weight: 500 !important;
             box-shadow: none !important;
-            margin: 1px 0 !important;
+            margin: 2px 0 !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button:hover {{
-            background: rgba(31, 42, 68, 0.05) !important;
+            background: rgba(31, 42, 68, 0.06) !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {{
             background: #ffffff !important;
@@ -161,9 +161,14 @@ def _inject_css(aktif_sayfa: str = ""):
             box-shadow: inset 4px 0 0 {aktif_renk} !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button p {{
-            font-size: 12.5px !important;
+            font-size: 14.5px !important;
             color: #1f2a44 !important;
             margin: 0 !important;
+            line-height: 1.3 !important;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button[kind="primary"] p {{
+            font-size: 15px !important;
+            font-weight: 600 !important;
         }}
         /* Sol menü selectbox ve date_input kutularını HTML tasarımla eşitle */
         section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
@@ -172,7 +177,24 @@ def _inject_css(aktif_sayfa: str = ""):
             border: 1px solid #cfc9bd !important;
             border-radius: 8px !important;
             font-size: 12px !important;
-            min-height: 36px !important;
+            min-height: 34px !important;
+        }}
+        /* Tarih kutularındaki (stDateInput) sayı puntolarını küçült ve iç boşluğu daralt ki tam sığsın */
+        section[data-testid="stSidebar"] [data-testid="stDateInput"] div[data-baseweb="input"],
+        section[data-testid="stSidebar"] [data-testid="stDateInput"] div[data-baseweb="base-input"] {{
+            padding: 0 4px !important;
+            min-height: 31px !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stDateInput"] input {{
+            font-size: 11px !important;
+            padding: 3px 2px !important;
+            letter-spacing: -0.02em !important;
+            text-align: center !important;
+            color: #1f2a44 !important;
+            font-weight: 500 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {{
+            gap: 6px !important;
         }}
         section[data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {{
             font-size: 12px !important;
@@ -573,8 +595,8 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
             st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:#5b6475'>{tarih_etiketi(a, b)}</div>", unsafe_allow_html=True)
         else:
             c1, c2 = st.columns(2)
-            a = c1.date_input("Başlangıç", value=ss["a"], min_value=min_d, max_value=max_d, key="inp_a", label_visibility="collapsed")
-            b = c2.date_input("Bitiş", value=ss["b"], min_value=min_d, max_value=max_d, key="inp_b", label_visibility="collapsed")
+            a = c1.date_input("Başlangıç", value=ss["a"], min_value=min_d, max_value=max_d, format="DD.MM.YYYY", key="inp_a", label_visibility="collapsed")
+            b = c2.date_input("Bitiş", value=ss["b"], min_value=min_d, max_value=max_d, format="DD.MM.YYYY", key="inp_b", label_visibility="collapsed")
             if a > b:
                 a, b = b, a
             ss["a"], ss["b"] = a, b
@@ -592,8 +614,8 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
             st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:#5b6475'>{tarih_etiketi(ca, cb)}</div>", unsafe_allow_html=True)
         else:
             cc1, cc2 = st.columns(2)
-            ca = cc1.date_input("Karş. başlangıç", value=ss["ca"], min_value=min_d, max_value=max_d, key="inp_ca", label_visibility="collapsed")
-            cb = cc2.date_input("Karş. bitiş", value=ss["cb"], min_value=min_d, max_value=max_d, key="inp_cb", label_visibility="collapsed")
+            ca = cc1.date_input("Karş. başlangıç", value=ss["ca"], min_value=min_d, max_value=max_d, format="DD.MM.YYYY", key="inp_ca", label_visibility="collapsed")
+            cb = cc2.date_input("Karş. bitiş", value=ss["cb"], min_value=min_d, max_value=max_d, format="DD.MM.YYYY", key="inp_cb", label_visibility="collapsed")
             if ca > cb:
                 ca, cb = cb, ca
             ss["ca"], ss["cb"] = ca, cb

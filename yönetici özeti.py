@@ -1,5 +1,5 @@
-"""RafRadar — Tek Dosya Tam Sürüm (streamlit_app.py)
-Tüm veri işleme, analitik modeller, HTML birebir kenar çubuğu (sidebar),
+"""B2B Karar Destek Sistemi — Tek Dosya Tam Sürüm (streamlit_app.py)
+Tüm veri işleme, analitik modeller, kurumsal kenar çubuğu (sidebar),
 6 departman sayfası ve Ayraç AI (Veriye Sor) sohbet asistanı bu tek dosyada birleştirilmiştir."""
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import streamlit as st
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-st.set_page_config(page_title="RafRadar", page_icon="📚", layout="wide")
+st.set_page_config(page_title="B2B Karar Destek Sistemi", page_icon="📊", layout="wide")
 KOK = Path(__file__).resolve().parent
 
 
@@ -1636,16 +1636,21 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
     aktif_sayfa = ss.get("_aktif_sayfa", "yonetici")
 
     with st.sidebar:
-        # 1. LOGO & BAŞLIK (HTML ile birebir)
+        # 1. KURUMSAL LOGO & BAŞLIK
         st.markdown(
             """
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                <svg width="28" height="26" viewBox="0 0 28 26" aria-hidden="true">
-                    <rect x="2" y="10" width="6" height="14" fill="#1f2a44"/>
-                    <rect x="11" y="3" width="6" height="21" fill="#3d9a84"/>
-                    <rect x="20" y="14" width="6" height="10" fill="#e0a526"/>
-                </svg>
-                <span style="font-family:Poppins,sans-serif;font-weight:700;font-size:20px;color:#1f2a44">RafRadar</span>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e4dfd6">
+                <div style="width:34px;height:34px;border-radius:9px;background:#1f2a44;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+                    <svg width="20" height="20" viewBox="0 0 28 26" aria-hidden="true">
+                        <rect x="2" y="10" width="6" height="14" rx="1.5" fill="#ffffff"/>
+                        <rect x="11" y="3" width="6" height="21" rx="1.5" fill="#3d9a84"/>
+                        <rect x="20" y="13" width="6" height="11" rx="1.5" fill="#e0a526"/>
+                    </svg>
+                </div>
+                <div style="line-height:1.2">
+                    <div style="font-family:Poppins,sans-serif;font-weight:700;font-size:15.5px;color:#1f2a44;letter-spacing:-0.01em">B2B Karar Destek</div>
+                    <div style="font-size:11px;color:#5b6475;font-weight:500">Kurumsal İş Zekâsı Paneli</div>
+                </div>
             </div>
             """,
             unsafe_allow_html=True,

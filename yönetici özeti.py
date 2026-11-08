@@ -2096,3 +2096,466 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
 
 if __name__ == "__main__":
     render_executive_summary()
+
+
+# =============================================================================
+# 8. ORTAK ÇOKLU DEPARTMAN ENTEGRASYON KİTİ (SHARED LAYOUT & DATA SDK)
+# =============================================================================
+DEPARTMENT_PAGES = [
+    "📊 Yönetici Özeti",
+    "🛠️ Veri Kalitesi",
+    "📈 Satış & Fiyat",
+    "🎯 Pazarlama & Müşteri",
+    "🚚 Tedarik Zinciri",
+]
+
+
+def render_shared_sidebar(valid_all_df: pd.DataFrame, pages: list = None) -> dict:
+    """
+    Tüm departmanlar için ortak sol menüyü (#side) oluşturur:
+    - RafRadar Logo & Başlığı
+    - Departman / Sayfa Seçimi
+    - Seçili Dönem (fa – fb) & Hızlı Dönem Seçici
+    - Karşılaştırma Dönemi (fca – fcb) & [Önceki dönem] / [Sıfırla] Butonları
+    - Kategori ve İl Filtreleri
+    """
+    global_min = valid_all_df["Date"].min()
+    global_max = valid_all_df["Date"].max()
+
+    def_a = max(global_min, min(global_max, datetime.date(2020, 11, 1)))
+    def_b = max(global_min, min(global_max, datetime.date(2020, 12, 14)))
+    def_ca = max(global_min, min(global_max, datetime.date(2020, 9, 1)))
+    def_cb = max(global_min, min(global_max, datetime.date(2020, 10, 31)))
+
+    if "rr_fa" not in st.session_state:
+        st.session_state["rr_fa"] = def_a
+        st.session_state["rr_fb"] = def_b
+        st.session_state["rr_fca"] = def_ca
+        st.session_state["rr_fcb"] = def_cb
+
+    nav_options = pages if pages is not None else DEPARTMENT_PAGES
+
+    with st.sidebar:
+        render_html(
+            """
+            <div style="display:flex; align-items:center; gap:9px; padding-bottom:12px; border-bottom:1px solid #e4dfd6; margin-bottom:12px;">
+                <svg width="28" height="26" viewBox="0 0 28 26" aria-hidden="true">
+                    <rect x="2" y="10" width="6" height="14" fill="#1f2a44"/>
+                    <rect x="11" y="3" width="6" height="21" fill="#3d9a84"/>
+                    <rect x="20" y="14" width="6" height="10" fill="#e0a526"/>
+                </svg>
+                <div>
+                    <div style="font-family:'Poppins',sans-serif; font-weight:700; font-size:20px; color:#1f2a44; line-height:1.1;">RafRadar</div>
+                    <div style="font-size:11px; color:#5b6475;">B2B Karar Destek Sistemi</div>
+                </div>
+            </div>
+            """
+        )
+
+        selected_page = st.radio(
+            "Departman / Sayfa",
+            nav_options,
+            index=0,
+            key="rr_dept_nav",
+        )
+        render_html("<div style='border-top:1px solid #e4dfd6; margin:10px 0;'></div>")
+
+        render_html(
+            "<div style='font-family:Poppins,sans-serif; font-size:12.5px; font-weight:600; color:#1f2a44; margin-bottom:4px;'>📅 Seçili dönem</div>"
+        )
+        preset = st.selectbox(
+            "Hızlı Dönem Seç",
+            [
+                "Özel / Varsayılan (1 Kas – 14 Ara)",
+                "Tüm Yıl (1 Oca – 31 Ara 2020)",
+                "Son Çeyrek (Eki – Ara 2020)",
+                "Okul Sezonu (Eyl – Kas 2020)",
+                "Yaz Dönemi (Haz – Ağu 2020)",
+                "İlk Yarıyıl (Oca – Haz 2020)",
+            ],
+            index=0,
+            label_visibility="collapsed",
+            key="rr_shared_preset",
+        )
+
+        if preset == "Tüm Yıl (1 Oca – 31 Ara 2020)":
+            st.session_state["rr_fa"] = global_min
+            st.session_state["rr_fb"] = global_max
+        elif preset == "Son Çeyrek (Eki – Ara 2020)":
+            st.session_state["rr_fa"] = max(global_min, datetime.date(2020, 10, 1))
+            st.session_state["rr_fb"] = global_max
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 7, 1))
+            st.session_state["rr_fcb"] = max(global_min, datetime.date(2020, 9, 30))
+        elif preset == "Okul Sezonu (Eyl – Kas 2020)":
+            st.session_state["rr_fa"] = max(global_min, datetime.date(2020, 9, 1))
+            st.session_state["rr_fb"] = max(global_min, datetime.date(2020, 11, 30))
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 6, 1))
+            st.session_state["rr_fcb"] = max(global_min, datetime.date(2020, 8, 31))
+        elif preset == "Yaz Dönemi (Haz – Ağu 2020)":
+            st.session_state["rr_fa"] = max(global_min, datetime.date(2020, 6, 1))
+            st.session_state["rr_fb"] = max(global_min, datetime.date(2020, 8, 31))
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 3, 1))
+            st.session_state["rr_fcb"] = max(global_min, datetime.date(2020, 5, 31))
+        elif preset == "İlk Yarıyıl (Oca – Haz 2020)":
+            st.session_state["rr_fa"] = global_min
+            st.session_state["rr_fb"] = max(global_min, datetime.date(2020, 6, 30))
+            st.session_state["rr_fca"] = max(global_min, datetime.date(2020, 7, 1))
+            st.session_state["rr_fcb"] = global_max
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            fa = st.date_input(
+                "Başlangıç",
+                value=st.session_state["rr_fa"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_shared_fa",
+            )
+        with sc2:
+            fb = st.date_input(
+                "Bitiş",
+                value=st.session_state["rr_fb"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_shared_fb",
+            )
+        if fa > fb:
+            fa, fb = fb, fa
+        st.session_state["rr_fa"], st.session_state["rr_fb"] = fa, fb
+
+        render_html(
+            "<div style='font-family:Poppins,sans-serif; font-size:12.5px; font-weight:600; color:#1f2a44; margin:10px 0 4px 0;'>⚖️ Karşılaştırma dönemi</div>"
+        )
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            fca = st.date_input(
+                "Karş. Başlangıç",
+                value=st.session_state["rr_fca"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_shared_fca",
+            )
+        with cc2:
+            fcb = st.date_input(
+                "Karş. Bitiş",
+                value=st.session_state["rr_fcb"],
+                min_value=global_min,
+                max_value=global_max,
+                key="rr_shared_fcb",
+            )
+        if fca > fcb:
+            fca, fcb = fcb, fca
+        st.session_state["rr_fca"], st.session_state["rr_fcb"] = fca, fcb
+
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            if st.button("Önceki dönem", use_container_width=True, key="rr_shared_prevper"):
+                days_len = max(1, (fb - fa).days + 1)
+                new_cb = max(global_min, fa - datetime.timedelta(days=1))
+                new_ca = max(global_min, new_cb - datetime.timedelta(days=days_len - 1))
+                st.session_state["rr_fca"] = new_ca
+                st.session_state["rr_fcb"] = new_cb
+                st.rerun()
+        with b_col2:
+            if st.button("Sıfırla", use_container_width=True, key="rr_shared_reset"):
+                st.session_state["rr_fa"] = def_a
+                st.session_state["rr_fb"] = def_b
+                st.session_state["rr_fca"] = def_ca
+                st.session_state["rr_fcb"] = def_cb
+                st.rerun()
+
+        render_html("<div style='border-top:1px solid #e4dfd6; margin:10px 0;'></div>")
+
+        top_cats = (
+            valid_all_df.groupby("Category")["TotalAmount"]
+            .sum()
+            .nlargest(25)
+            .index.tolist()
+        )
+        selected_cat = st.selectbox(
+            "📚 Kategori Filtresi",
+            ["Tüm Kategoriler"] + top_cats,
+            index=0,
+            key="rr_shared_cat",
+        )
+
+        top_cities = (
+            valid_all_df.groupby("City")["TotalAmount"]
+            .sum()
+            .nlargest(30)
+            .index.tolist()
+        )
+        selected_city = st.selectbox(
+            "🏙️ İl Filtresi",
+            ["Tüm İller"] + top_cities,
+            index=0,
+            key="rr_shared_city",
+        )
+
+    return {
+        "page": selected_page,
+        "fa": st.session_state["rr_fa"],
+        "fb": st.session_state["rr_fb"],
+        "fca": st.session_state["rr_fca"],
+        "fcb": st.session_state["rr_fcb"],
+        "category": selected_cat,
+        "city": selected_city,
+    }
+
+
+def build_shared_context(raw_df: pd.DataFrame = None, pages: list = None, external_filters: dict = None) -> dict:
+    """
+    Tüm departmanların ortak kullanacağı veri, filtre ve metrik bağlamını (ctx) üretir.
+    Her departman bu ctx sözlüğünü alarak:
+    - ctx["sel_df"]   : Seçili dönem net satış DataFrame'i
+    - ctx["comp_df"]  : Karşılaştırma dönemi net satış DataFrame'i
+    - ctx["S"], ctx["C"] : Seçili ve karşılaştırma dönemi hazır özet metrikleri (rafradar-versiyon2.html S ve C yapısı)
+    - ctx["m"]        : Detaylı analitik metrikler
+    üzerinden kendi grafiklerini ve tablolarını doğrudan çizebilir.
+    """
+    inject_rafradar_v2_css()
+
+    full_raw_df = raw_df if (raw_df is not None and not raw_df.empty) else load_rafradar_data()
+    if full_raw_df.empty:
+        return {}
+
+    if "DiscountPct" not in full_raw_df.columns or "EstProfit" not in full_raw_df.columns:
+        full_raw_df = load_rafradar_data()
+
+    valid_all_df = full_raw_df[~full_raw_df["IsReturn"]].copy()
+
+    nav = external_filters if external_filters is not None else render_shared_sidebar(valid_all_df, pages=pages)
+
+    fa, fb = nav["fa"], nav["fb"]
+    fca, fcb = nav["fca"], nav["fcb"]
+    selected_cat = nav.get("category", "Tüm Kategoriler")
+    selected_city = nav.get("city", "Tüm İller")
+    selected_page = nav.get("page", DEPARTMENT_PAGES[0])
+
+    s_days = max(1, (fb - fa).days + 1)
+    c_days = max(1, (fcb - fca).days + 1)
+
+    filtered_raw_all = full_raw_df.copy()
+    filtered_valid_all = valid_all_df.copy()
+
+    if selected_cat != "Tüm Kategoriler":
+        filtered_raw_all = filtered_raw_all[filtered_raw_all["Category"] == selected_cat]
+        filtered_valid_all = filtered_valid_all[filtered_valid_all["Category"] == selected_cat]
+
+    if selected_city != "Tüm İller":
+        filtered_raw_all = filtered_raw_all[filtered_raw_all["City"] == selected_city]
+        filtered_valid_all = filtered_valid_all[filtered_valid_all["City"] == selected_city]
+
+    scope_sales_df = filtered_valid_all[(filtered_valid_all["Date"] >= fa) & (filtered_valid_all["Date"] <= fb)].copy()
+    comp_sales_df = filtered_valid_all[(filtered_valid_all["Date"] >= fca) & (filtered_valid_all["Date"] <= fcb)].copy()
+    scope_raw_df = filtered_raw_all[(filtered_raw_all["Date"] >= fa) & (filtered_raw_all["Date"] <= fb)].copy()
+
+    if scope_sales_df.empty:
+        return {
+            "empty": True,
+            "page": selected_page,
+            "nav": nav,
+            "fa": fa,
+            "fb": fb,
+            "fca": fca,
+            "fcb": fcb,
+            "s_days": s_days,
+            "c_days": c_days,
+            "sel_lbl": fmt_range_tr(fa, fb),
+            "comp_lbl": fmt_range_tr(fca, fcb),
+            "category": selected_cat,
+            "city": selected_city,
+            "full_raw_df": filtered_raw_all,
+            "valid_all_df": filtered_valid_all,
+            "sel_df": scope_sales_df,
+            "comp_df": comp_sales_df,
+            "raw_scope_df": scope_raw_df,
+        }
+
+    m = compute_dynamic_metrics(scope_sales_df, comp_sales_df, scope_raw_df, s_days, c_days)
+    sel_lbl = fmt_range_tr(fa, fb)
+    comp_lbl = fmt_range_tr(fca, fcb)
+
+    # Yeni müşteri sayısı (İlk alımını seçili dönemde yapanlar - Pazarlama KPI için)
+    first_buy_dates = filtered_valid_all.groupby("CustomerID")["Date"].min()
+    new_cust_count = int(((first_buy_dates >= fa) & (first_buy_dates <= fb)).sum())
+
+    s_qty = float(scope_sales_df["Quantity"].sum())
+    c_qty = float(comp_sales_df["Quantity"].sum()) if not comp_sales_df.empty else 0.0
+    s_dq = s_qty / max(1, s_days)
+    c_dq = c_qty / max(1, c_days)
+
+    s_per_c = m["net_rev"] / max(1, m["active_customers"])
+    c_per_c = m["comp_net_rev"] / max(1, m["comp_customers"]) if m["comp_customers"] > 0 else 0.0
+    s_dpc = m["d_net_rev"] / max(1e-6, m["d_cust"]) if m["d_cust"] > 0 else 0.0
+    c_dpc = m["d_comp_rev"] / max(1e-6, m["d_comp_cust"]) if m["d_comp_cust"] > 0 else 0.0
+
+    s_aov = m["net_rev"] / max(1, m["total_invoices"])
+    c_aov = m["comp_net_rev"] / max(1, m["comp_invoices"]) if m["comp_invoices"] > 0 else 0.0
+
+    def _rel(a, b):
+        if b == 0 or pd.isna(b):
+            return 0.0
+        return ((a - b) / abs(b)) * 100.0
+
+    S_summary = {
+        "days": s_days,
+        "net": m["net_rev"],
+        "dnet": m["d_net_rev"],
+        "gross": m["gross_rev"],
+        "profit": m["est_profit"],
+        "dprofit": m["d_profit"],
+        "margin": m["profit_margin"],
+        "disc": m["avg_discount"],
+        "cust": m["active_customers"],
+        "dcust": m["d_cust"],
+        "new_cust": new_cust_count,
+        "orders": m["total_invoices"],
+        "dorders": m["d_inv"],
+        "qty": s_qty,
+        "dqty": s_dq,
+        "sku": m["active_skus"],
+        "per_cust": s_per_c,
+        "d_per_cust": s_dpc,
+        "aov": s_aov,
+    }
+    C_summary = {
+        "days": c_days,
+        "net": m["comp_net_rev"],
+        "dnet": m["d_comp_rev"],
+        "profit": m["comp_profit"],
+        "dprofit": m["d_comp_profit"],
+        "disc": m["comp_discount"],
+        "cust": m["comp_customers"],
+        "dcust": m["d_comp_cust"],
+        "orders": m["comp_invoices"],
+        "dorders": m["d_comp_inv"],
+        "qty": c_qty,
+        "dqty": c_dq,
+        "sku": m["comp_skus"],
+        "per_cust": c_per_c,
+        "d_per_cust": c_dpc,
+        "aov": c_aov,
+        "qty_chg": _rel(s_qty, c_qty),
+        "dqty_chg": _rel(s_dq, c_dq),
+        "per_cust_chg": _rel(s_per_c, c_per_c),
+        "d_per_cust_chg": _rel(s_dpc, c_dpc),
+        "aov_chg": _rel(s_aov, c_aov),
+    }
+
+    return {
+        "empty": False,
+        "page": selected_page,
+        "nav": nav,
+        "fa": fa,
+        "fb": fb,
+        "fca": fca,
+        "fcb": fcb,
+        "s_days": s_days,
+        "c_days": c_days,
+        "sel_lbl": sel_lbl,
+        "comp_lbl": comp_lbl,
+        "category": selected_cat,
+        "city": selected_city,
+        "full_raw_df": filtered_raw_all,
+        "valid_all_df": filtered_valid_all,
+        "sel_df": scope_sales_df,
+        "comp_df": comp_sales_df,
+        "raw_scope_df": scope_raw_df,
+        "m": m,
+        "S": S_summary,
+        "C": C_summary,
+    }
+
+
+def render_department_header_and_kpis(
+    title: str,
+    subtitle: str,
+    ctx: dict,
+    kpi_cards: list = None,
+    note_text: str = None,
+):
+    """
+    rafradar-versiyon2.html'deki her departman sayfasının üst kısmında ortak olan:
+    1) Sayfa Başlığı (head(title, subtitle)) + Sağ üstte 💬 RafRadar Asistanı + Sağ altta yüzen sohbet ikonu
+    2) Seçili Dönem vs Karşılaştırma Dönemi Hapları (pills())
+    3) 5 Sütunlu KPI Kart Şeridi (kcard() - üstte toplam, kesikli çizgi, altta günlük ortalama)
+    4) Bilgi Notu Bandı (note())
+    yapısını tek çağrıyla çizer.
+    """
+    m = ctx["m"]
+    sel_lbl = ctx["sel_lbl"]
+    comp_lbl = ctx["comp_lbl"]
+    s_days = ctx["s_days"]
+    c_days = ctx["c_days"]
+    selected_cat = ctx["category"]
+    selected_city = ctx["city"]
+
+    hdr_left, hdr_right = st.columns([7.8, 2.2])
+    with hdr_left:
+        render_html(
+            f"""
+            <header class="rr-header">
+                <div>
+                    <h1>{title}</h1>
+                    <p>{subtitle}</p>
+                </div>
+            </header>
+            """
+        )
+    with hdr_right:
+        render_chatbox_widgets(m, sel_lbl, comp_lbl, selected_cat)
+
+    cat_pill_html = (
+        f'<span class="pill" style="background:#dbe5f8;color:#1f2a44;">Kategori: {selected_cat}</span>'
+        if selected_cat != "Tüm Kategoriler"
+        else ""
+    )
+    city_pill_html = (
+        f'<span class="pill" style="background:#fdf0cf;color:#7a5600;">İl: {selected_city}</span>'
+        if selected_city != "Tüm İller"
+        else ""
+    )
+    render_html(
+        f"""
+        <section class="rr-pills">
+            <span class="pill" style="background:#d6ece5;color:#14513f;">Seçili: {sel_lbl} · {s_days} gün</span>
+            <span style="font-size:12px;color:#5b6475;">karşılaştırma</span>
+            <span class="pill" style="background:#ece7dd;color:#1f2a44;">{comp_lbl} · {c_days} gün</span>
+            {cat_pill_html}
+            {city_pill_html}
+        </section>
+        """
+    )
+
+    if kpi_cards:
+        cols = st.columns(len(kpi_cards))
+        for col, card in zip(cols, kpi_cards):
+            with col:
+                render_kcard(
+                    label=card["label"],
+                    main_val=card["main_val"],
+                    main_chg_html=card.get("main_chg_html", ""),
+                    sub_label=card.get("sub_label", "Günlük ort."),
+                    sub_val=card.get("sub_val", ""),
+                    sub_chg_html=card.get("sub_chg_html", ""),
+                    top_color=card.get("top_color", "#3d9a84"),
+                )
+
+    if note_text:
+        render_html(f'<div class="rr-note">{note_text}</div>')
+
+
+def render_section_card_header(num: int, title: str, subtitle: str = "", takeaway: str = ""):
+    """rafradar-versiyon2.html'deki numaralı kart başlığını (sec(num, title, sub)) çizer."""
+    sub_html = f'<p class="sub">{subtitle}</p>' if subtitle else ""
+    take_html = f'<div class="section-takeaway">{takeaway}</div>' if takeaway else ""
+    render_html(
+        f"""
+        <div class="card" style="margin-bottom:10px;">
+            <h2 class="h"><span class="num">{num}</span>{title}</h2>
+            {sub_html}
+            {take_html}
+        </div>
+        """
+    )

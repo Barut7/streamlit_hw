@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 
 warnings.filterwarnings("ignore")
 
@@ -14,7 +15,7 @@ warnings.filterwarnings("ignore")
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="RafRadar Dashboard",
+        page_title="RafRadar | Yönetici Özeti & Veri Kalitesi",
         page_icon="📊",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -22,7 +23,7 @@ if __name__ == "__main__":
 
 
 def render_html(html_str: str):
-    """Girintileri temizleyerek Markdown'ın HTML'i kod bloğu sanmasını engeller."""
+    """Girintileri temizleyerek Markdown'ın HTML'i kod bloğu sanmasını %100 engeller."""
     cleaned = "\n".join(line.strip() for line in html_str.splitlines() if line.strip())
     st.markdown(cleaned, unsafe_allow_html=True)
 
@@ -126,6 +127,7 @@ def load_rafradar_data() -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 MONTH_TR_SHORT = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
 MONTH_TR_FULL = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+DOW_TR_NAMES = {0: "Pazartesi", 1: "Salı", 2: "Çarşamba", 3: "Perşembe", 4: "Cuma", 5: "Cumartesi", 6: "Pazar"}
 
 
 def fmt_date_tr(d: datetime.date) -> str:
@@ -255,7 +257,7 @@ def inject_rafradar_v2_css():
         .kv2 {
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
-            font-size: 16px;
+            font-size: 15px;
             color: #1f2a44;
             margin: 2px 0;
         }
@@ -269,6 +271,7 @@ def inject_rafradar_v2_css():
         }
         .pos  { background: #d6ece5; color: #14513f; }
         .neg  { background: #fbe3e0; color: #8f2a24; }
+        .warn { background: #fdf0cf; color: #7a5600; }
         .mute { background: #f0ebe2; color: #5b6475; }
         .neu  { background: #e4e7ee; color: #2b3550; }
         .rule { border-top: 1px dashed #d9d3c7; margin: 8px 0 6px 0; }
@@ -291,6 +294,24 @@ def inject_rafradar_v2_css():
             align-items: center;
         }
         .sub { font-size: 12px; color: #5b6475; margin: 3px 0 0 0; }
+        .section-takeaway {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: #1f2a44;
+            margin: 6px 0 4px 0;
+            line-height: 1.4;
+        }
+        .insight-box {
+            background-color: #faf7f2;
+            border: 1px solid #e4dfd6;
+            border-left: 4px solid #3d9a84;
+            padding: 10px 13px;
+            border-radius: 0 8px 8px 0;
+            font-size: 12px;
+            color: #1f2a44;
+            line-height: 1.45;
+            margin-top: 8px;
+        }
         .num {
             display: inline-flex;
             align-items: center;
@@ -330,20 +351,117 @@ def inject_rafradar_v2_css():
         .mini h3 { font-size: 13px; font-weight: 600; margin: 0 0 2px 0; }
         .mini ol { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; line-height: 1.45; }
         .mini li { margin-bottom: 5px; }
-        .track {
+        .leak-grid {
             display: grid;
-            grid-template-columns: 195px minmax(140px, 1fr) 170px;
-            gap: 12px;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .leak-item {
+            background: #faf7f2;
+            border: 1px solid #e4dfd6;
+            border-radius: 8px;
+            padding: 8px 10px;
+        }
+        .leak-item-title {
+            display: flex;
+            justify-content: space-between;
             align-items: center;
-            padding: 7px 0;
-            border-bottom: 1px solid #f0ebe2;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1f2a44;
+            margin-bottom: 2px;
+        }
+        .leak-item-desc {
+            font-size: 11px;
+            color: #5b6475;
+            line-height: 1.35;
+        }
+        .pareto-box {
+            background: #faf7f2;
+            border: 1px solid #e4dfd6;
+            border-radius: 10px;
+            padding: 11px 13px;
+            margin-bottom: 8px;
+        }
+        .abc-stack-bar {
+            display: flex;
+            height: 24px;
+            border-radius: 7px;
+            overflow: hidden;
+            margin: 5px 0 4px 0;
+        }
+        .tier-row { margin-bottom: 6px; }
+        .tier-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11.5px;
+            font-weight: 600;
+            color: #1f2a44;
+            margin-bottom: 2px;
+        }
+        .tier-bar-bg {
+            width: 100%;
+            height: 6px;
+            background: #efe9de;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .tier-bar-fill { height: 100%; border-radius: 4px; }
+        .action-card {
+            background: #faf7f2;
+            border: 1px solid #e4dfd6;
+            border-left: 4px solid #3d9a84;
+            border-radius: 10px;
+            padding: 11px 13px;
+            margin-bottom: 8px;
+        }
+        .action-card.urgent { border-left-color: #d0574f; }
+        .action-card.high   { border-left-color: #e0a526; }
+        .action-card.medium { border-left-color: #3d9a84; }
+        .action-card.blue   { border-left-color: #3b6fd1; }
+        .action-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .action-headline {
+            font-family: 'Poppins', sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            color: #1f2a44;
+            margin-bottom: 3px;
+        }
+        .action-body {
+            font-size: 11.5px;
+            color: #5b6475;
+            line-height: 1.4;
+            margin-bottom: 6px;
+        }
+        .action-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #ffffff;
+            padding: 5px 10px;
+            border-radius: 6px;
+            border: 1px solid #e4dfd6;
+            font-size: 11.5px;
+        }
+        .action-impact {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 13.5px;
         }
         .hm { width: 100%; border-collapse: separate; border-spacing: 0; }
         .hm td { text-align: center; font-size: 12px; font-weight: 600; padding: 7px 4px; border: 2px solid #fff; }
         .hm th { font-size: 11px; font-weight: 600; color: #5b6475; padding: 4px; text-align: center; border: none; }
         .rr-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        .rr-table th { font-size: 11px; font-weight: 600; color: #5b6475; text-align: left; padding: 6px 8px; border-bottom: 1px solid #e4dfd6; }
-        .rr-table td { font-size: 12px; padding: 8px; border-bottom: 1px solid #f0ebe2; vertical-align: middle; }
+        .rr-table th { font-size: 11px; font-weight: 600; color: #5b6475; text-align: left; padding: 7px 8px; border-bottom: 2px solid #e4dfd6; text-transform: uppercase; }
+        .rr-table td { font-size: 12px; padding: 8px; border-bottom: 1px solid #f0ebe2; vertical-align: middle; color: #1f2a44; }
         .vq-step-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: stretch; }
         .vq-step { flex: 1 1 130px; min-width: 0; border: 1px solid #e4dfd6; border-radius: 10px; padding: 11px 13px; }
         .vq-step-label { font-size: 11px; font-weight: 600; color: #5b6475; }
@@ -440,7 +558,7 @@ def render_kcard(
 
 def render_section_card_header(num: int, title: str, subtitle: str = "", takeaway: str = ""):
     sub_html = f'<p class="sub">{subtitle}</p>' if subtitle else ""
-    take_html = f'<div style="font-size:13.5px;font-weight:600;margin:6px 0 0 0;line-height:1.4;color:#1f2a44;">{takeaway}</div>' if takeaway else ""
+    take_html = f'<div class="section-takeaway">{takeaway}</div>' if takeaway else ""
     render_html(
         f"""
         <div class="card" style="margin-bottom:10px;">
@@ -565,7 +683,7 @@ def render_shared_sidebar(valid_all_df: pd.DataFrame, pages: list = None) -> dic
 
 
 def render_rafradar_sidebar(valid_all_df: pd.DataFrame, show_page_nav: bool = True, pages: list = None) -> dict:
-    opts = pages if pages is not None else (["Yönetici Özeti", "Veri Kalitesi"] if show_page_nav else ["Yönetici Özeti"])
+    opts = pages if pages is not None else (["📊 Yönetici Özeti", "🛠️ Veri Kalitesi"] if show_page_nav else ["📊 Yönetici Özeti"])
     return render_shared_sidebar(valid_all_df, pages=opts)
 
 
@@ -983,7 +1101,7 @@ def answer_executive_question(query: str, m: dict, sel_lbl: str, comp_lbl: str, 
     if any(k in q for k in ["ciro", "büyü", "kâr", "kar", "marj", "finans", "durum"]):
         return (
             f"**{sel_lbl}:** Net ciro **{fmt_tl(m['net_rev'])}** (günlük ort. **{fmt_tl(m['d_net_rev'], 1)}**), "
-            f"tahmini kâr **{fmt_tl(m['est_profit'])} (%{m['profit_margin']:.1f} marj)**."
+            f"tahmini brüt kâr **{fmt_tl(m['est_profit'])} (%{m['profit_margin']:.1f} marj)**."
         )
     if any(k in q for k in ["iskonto", "indirim", "kaçak", "anomali", "şüpheli", "fiyat"]):
         return (
@@ -997,7 +1115,8 @@ def answer_executive_question(query: str, m: dict, sel_lbl: str, comp_lbl: str, 
         )
     if any(k in q for k in ["pareto", "80/20", "portföy", "abc"]):
         return (
-            f"Müşterilerin **%{m['vip_cust_share_pct']:.1f}'i** ve ürünlerin **%{m['a_sku_share_pct']:.1f}'i** cironun %80'ini getiriyor."
+            f"Müşterilerin **%{m['vip_cust_share_pct']:.1f}'i** ve ürünlerin **%{m['a_sku_share_pct']:.1f}'i** cironun %80'ini getiriyor. "
+            f"İlk 10 müşteri cironun **%{m['top10_cust_rev_share']:.1f}**'ini üretiyor."
         )
     if any(k in q for k in ["stok", "tedarik", "ölü", "hareketsiz", "ürün"]):
         return (
@@ -1008,7 +1127,7 @@ def answer_executive_question(query: str, m: dict, sel_lbl: str, comp_lbl: str, 
         return (
             f"**30 Günlük Toplam Potansiyel: +{fmt_tl(total_opp)}** "
             f"(VIP geri kazanım +{fmt_tl(m['vip_recovery_potential_tl'])}, İndirim tavanı +{fmt_tl(m['discount_leak_tl'])}, "
-            f"Stok & Paket +{fmt_tl(m['stockout_prevention_tl'] + m['retention_potential_tl'])})."
+            f"A sınıfı stok koruması +{fmt_tl(m['stockout_prevention_tl'])}, 2. sipariş paketi +{fmt_tl(m['retention_potential_tl'])})."
         )
     return (
         f"**{sel_lbl}:** Net ciro **{fmt_tl(m['net_rev'])}**, aktif müşteri **{fmt_int(m['active_customers'])}**, "
@@ -1140,83 +1259,9 @@ def render_department_header_and_kpis(
 
 
 # -----------------------------------------------------------------------------
-# 7. YÖNETİCİ ÖZETİ & VERİ KALİTESİ (RAFRADAR-VERSIYON2.HTML BİREBİR UYARLAMA)
+# 7. YÖNETİCİ ÖZETİ & VERİ KALİTESİ (İLK TASARIM + RAFRADAR V2 BİRLEŞİMİ)
+#    (Eski 3. kısım olan 'Dönem özeti .track' tamamen kaldırıldı)
 # -----------------------------------------------------------------------------
-def _build_track_svg(monthly_vals: list, yr_mean: float, sel_val: float, color: str, fmt_fn) -> str:
-    vals = [float(v) for v in monthly_vals if not pd.isna(v)] + [float(yr_mean), float(sel_val)]
-    lo = min(vals) if vals else 0.0
-    hi = max(vals) if vals else 1.0
-    span = max(1e-6, hi - lo)
-
-    def _x(v):
-        return 14.0 + ((float(v) - lo) / span) * 272.0
-
-    dots_svg = "".join(
-        f'<circle cx="{_x(v):.1f}" cy="18" r="3.5" fill="#b9b3a6"><title>{MONTH_TR_SHORT[i]}: {fmt_fn(v)}</title></circle>'
-        for i, v in enumerate(monthly_vals)
-    )
-    mx = _x(yr_mean)
-    sx = _x(sel_val)
-    return (
-        f'<svg viewBox="0 0 300 40" width="100%">'
-        f'<rect x="8" y="14" width="284" height="8" rx="4" fill="#efe9de"/>'
-        f"{dots_svg}"
-        f'<line x1="{mx:.1f}" y1="7" x2="{mx:.1f}" y2="29" stroke="#1f2a44" stroke-width="2"/>'
-        f'<circle cx="{sx:.1f}" cy="18" r="7.5" fill="{color}" stroke="#fff" stroke-width="2"><title>Seçili: {fmt_fn(sel_val)}</title></circle>'
-        f'<text x="8" y="38" font-size="9" fill="#5b6475">{fmt_fn(lo)}</text>'
-        f'<text x="292" y="38" font-size="9" fill="#5b6475" text-anchor="end">{fmt_fn(hi)}</text>'
-        f"</svg>"
-    )
-
-
-def _build_yearly_overview_svg(monthly_df: pd.DataFrame) -> str:
-    """rafradar-versiyon2.html 1. paneldeki (Yıllık genel bakış) SVG grafik."""
-    revs = monthly_df["NetRev"].tolist()
-    discs = monthly_df["DiscPct"].tolist()
-    max_r = max(max(revs, default=1.0), 1.0) * 1.12
-    bars_svg = ""
-    pts = []
-    dots_svg = ""
-    peak_idx = int(np.argmax(revs)) if revs else 0
-
-    for i in range(12):
-        r = revs[i] if i < len(revs) else 0.0
-        d = discs[i] if i < len(discs) else 0.0
-        x = 46 + i * 45
-        lx = x + 15
-        h = max(2.0, (r / max_r) * 145.0)
-        y = 170.0 - h
-        fill = "#3d9a84" if i == peak_idx else "#1f2a44"
-        bars_svg += (
-            f'<rect x="{x}" y="{y:.1f}" width="30" height="{h:.1f}" rx="3" fill="{fill}">'
-            f"<title>{MONTH_TR_FULL[i]}: {fmt_tl(r)} · İndirim %{d:.1f}</title></rect>"
-            f'<text x="{lx}" y="188" font-size="10" fill="#5b6475" text-anchor="middle">{MONTH_TR_SHORT[i]}</text>'
-        )
-        dy = 170.0 - (min(max(d, 0.0), 60.0) / 60.0) * 140.0
-        pts.append(f"{lx:.1f},{dy:.1f}")
-        dots_svg += f'<circle cx="{lx:.1f}" cy="{dy:.1f}" r="3.5" fill="#e0a526" stroke="#fff" stroke-width="1"/>'
-
-    peak_x = 46 + peak_idx * 45 + 15
-    peak_txt = f"Zirve: {MONTH_TR_SHORT[peak_idx]} ({fmt_tl(revs[peak_idx], 1)})" if revs else ""
-    mid_lbl = fmt_tl(max_r * 0.5, 1)
-    top_lbl = fmt_tl(max_r, 1)
-
-    return (
-        f'<svg viewBox="0 0 600 205" width="100%" style="margin-top:6px;">'
-        f'<line x1="40" y1="170" x2="590" y2="170" stroke="#cfc9bd"/>'
-        f'<line x1="40" y1="95" x2="590" y2="95" stroke="#efe9de"/>'
-        f'<line x1="40" y1="20" x2="590" y2="20" stroke="#efe9de"/>'
-        f'<text x="36" y="174" font-size="9.5" fill="#5b6475" text-anchor="end">0</text>'
-        f'<text x="36" y="99" font-size="9.5" fill="#5b6475" text-anchor="end">{mid_lbl}</text>'
-        f'<text x="36" y="24" font-size="9.5" fill="#5b6475" text-anchor="end">{top_lbl}</text>'
-        f"{bars_svg}"
-        f'<polyline points="{" ".join(pts)}" fill="none" stroke="#e0a526" stroke-width="2.5"/>'
-        f"{dots_svg}"
-        f'<text x="{peak_x}" y="13" font-size="10" fill="#1f2a44" text-anchor="middle" font-weight="600">{peak_txt}</text>'
-        f"</svg>"
-    )
-
-
 def render_executive_summary(filtered_df=None, raw_df=None, external_filters: dict = None):
     ctx = build_shared_context(raw_df=raw_df, external_filters=external_filters)
     if not ctx or ctx.get("empty", False):
@@ -1231,14 +1276,13 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
     sel_lbl = ctx["sel_lbl"]
     comp_lbl = ctx["comp_lbl"]
     s_days = ctx["s_days"]
-    c_days = ctx["c_days"]
     selected_cat = ctx["category"]
     selected_page = ctx["page"]
 
     is_kalite = "Veri Kalitesi" in str(selected_page)
 
     # =========================================================================
-    # SAYFA 1: YÖNETİCİ ÖZETİ (rafradar-versiyon2.html 'yonetici' Birebir)
+    # SAYFA 1: YÖNETİCİ ÖZETİ
     # =========================================================================
     if not is_kalite:
         disc_pts_str = f"{m['disc_diff_pts']:+.1f} puan".replace(".", ",")
@@ -1255,7 +1299,7 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
                 "top_color": "#3d9a84",
             },
             {
-                "label": "Tahmini brüt kâr",
+                "label": "Tahmini brüt kâr & marj",
                 "main_val": fmt_tl(S["profit"]),
                 "main_chg_html": f'<span class="chg pos">%{S["margin"]:.1f} marj</span>',
                 "sub_label": "Günlük ort.",
@@ -1264,11 +1308,11 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
                 "top_color": "#e0a526",
             },
             {
-                "label": "Aktif müşteri",
+                "label": "Aktif müşteri & Pareto",
                 "main_val": fmt_int(S["cust"]),
                 "main_chg_html": chg_badge_html(m["cust_chg"]),
-                "sub_label": "Günlük ort.",
-                "sub_val": f"{S['dcust']:.1f}".replace(".", ","),
+                "sub_label": f"%{m['vip_cust_share_pct']:.0f}'i = %80 ciro",
+                "sub_val": f"{S['dcust']:.1f}/gün".replace(".", ","),
                 "sub_chg_html": chg_badge_html(m["d_cust_chg"]),
                 "top_color": "#3b6fd1",
             },
@@ -1282,294 +1326,490 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
                 "top_color": "#d0574f",
             },
             {
-                "label": "Sipariş adedi",
-                "main_val": fmt_int(S["orders"]),
-                "main_chg_html": chg_badge_html(m["inv_chg"]),
-                "sub_label": "Günlük ort.",
-                "sub_val": f"{S['dorders']:.1f}".replace(".", ","),
-                "sub_chg_html": chg_badge_html(m["d_inv_chg"]),
+                "label": "Aktif SKU & ölü stok",
+                "main_val": fmt_int(S["sku"]),
+                "main_chg_html": chg_badge_html(m["sku_chg"]),
+                "sub_label": f"{m['dead_threshold']}+ gün pasif",
+                "sub_val": f"{fmt_int(m['dead_sku_count'])} SKU",
+                "sub_chg_html": f'<span class="chg mute">{fmt_int(S["orders"])} sipariş</span>',
                 "top_color": "#1f2a44",
             },
         ]
 
         render_department_header_and_kpis(
             title="Yönetici Özeti",
-            subtitle="Seçtiğim dönem yılın neresinde ve önümüzdeki 30 günde ne yapmalıyız?",
+            subtitle="Şirket büyüyor mu, kârlılığımız güvende mi ve önümüzdeki 30 günde hangi kritik aksiyonları almalıyız?",
             ctx=ctx,
             kpi_cards=kpi_cards,
         )
 
         # ---------------------------------------------------------------------
-        # BÖLÜM 1 (YILLIK GENEL BAKIŞ) & BÖLÜM 2 (PORTFÖY YAPISI)
+        # ORTA BÖLÜM:
+        # [1] FİNANSAL PERFORMANS, SEZONSALLIK VE İSKONTO DİSİPLİNİ
+        # [2] KÂR SIZINTISI VE FIRSAT HAVUZU (CİRO KÖPRÜSÜ + 4 SIZINTI KARTI)
         # ---------------------------------------------------------------------
-        col_y1, col_y2 = st.columns([6.3, 3.7])
+        col_left, col_right = st.columns([5.5, 4.5])
 
-        with col_y1:
-            yh1, yh2 = st.columns([7.5, 2.5])
-            with yh1:
-                render_html(
-                    """
-                    <div>
-                        <h2 class="h"><span class="num">1</span>Yıllık genel bakış</h2>
-                        <p class="sub">Tarih filtresinden bağımsız · çubuk: aylık net ciro · çizgi: indirim oranı</p>
-                    </div>
-                    """
+        with col_left:
+            vh1, vh2 = st.columns([6.6, 3.4])
+            with vh2:
+                chart_mode = st.selectbox(
+                    "Görünüm",
+                    ["Yıllık (12 Ay)", "Seçili Dönem"],
+                    index=0,
+                    label_visibility="collapsed",
+                    key="rr_exec_chart_mode",
                 )
-            with yh2:
-                yr_sel = st.selectbox("Yıl", ["2020", "2019", "2021"], index=0, label_visibility="collapsed", key="rr_exec_yr")
 
-            if yr_sel != "2020":
-                render_html(
-                    f"""
-                    <div class="card" style="padding:36px 16px;text-align:center;background:#faf7f2;">
-                        <b style="color:#1f2a44;">{yr_sel} için veri yok.</b><br>
-                        <span style="font-size:12px;color:#5b6475;">Veri seti yalnız 2020 yılını kapsıyor.</span>
-                    </div>
-                    """
-                )
-            else:
+            if chart_mode == "Yıllık (12 Ay)" or s_days > 65:
                 m_grid = pd.DataFrame({"Month": list(range(1, 13))})
                 m_agg = (
                     valid_all_df.groupby("Month", as_index=False)
                     .agg(NetRev=("TotalAmount", "sum"), GrossRev=("GrossAmount", "sum"))
                 )
-                m_grid = m_grid.merge(m_agg, on="Month", how="left").fillna(0.0)
-                m_grid["DiscPct"] = np.where(
-                    m_grid["GrossRev"] > 0,
-                    (m_grid["GrossRev"] - m_grid["NetRev"]) / m_grid["GrossRev"] * 100.0,
-                    0.0,
+                ts_df = m_grid.merge(m_agg, on="Month", how="left").fillna(0.0)
+                ts_df["Label"] = [MONTH_TR_SHORT[i - 1] for i in ts_df["Month"]]
+                period_sub = "12 aylık net ciro (çubuk) ve ortalama iskonto oranı (çizgi)"
+            else:
+                ts_df = (
+                    scope_sales_df.groupby("Date", as_index=False)
+                    .agg(NetRev=("TotalAmount", "sum"), GrossRev=("GrossAmount", "sum"))
+                    .sort_values("Date")
                 )
-                yr_tot_net = float(m_grid["NetRev"].sum())
-                yr_tot_gross = float(m_grid["GrossRev"].sum())
-                yr_avg_disc = ((yr_tot_gross - yr_tot_net) / yr_tot_gross * 100.0) if yr_tot_gross > 0 else 0.0
-                svg_yr = _build_yearly_overview_svg(m_grid)
+                ts_df["Label"] = pd.to_datetime(ts_df["Date"]).dt.strftime("%d %b")
+                period_sub = f"Seçili dönem ({sel_lbl}) günlük net ciro ve iskonto oranı"
 
+            ts_df["DiscPct"] = np.where(
+                ts_df["GrossRev"] > 0,
+                (ts_df["GrossRev"] - ts_df["NetRev"]) / ts_df["GrossRev"] * 100.0,
+                0.0,
+            )
+
+            nonzero_ts = ts_df[ts_df["NetRev"] > 0] if (ts_df["NetRev"] > 0).any() else ts_df
+            rev_thresh = nonzero_ts["NetRev"].quantile(0.68) if len(nonzero_ts) > 3 else nonzero_ts["NetRev"].mean()
+            bar_colors = ["#3d9a84" if v >= rev_thresh else "#1f2a44" for v in ts_df["NetRev"]]
+
+            peak_row = nonzero_ts.loc[nonzero_ts["NetRev"].idxmax()]
+            low_row = nonzero_ts.loc[nonzero_ts["NetRev"].idxmin()]
+            peak_to_low_ratio = peak_row["NetRev"] / max(1.0, low_row["NetRev"])
+            peak_disc_avg = nonzero_ts.loc[nonzero_ts["NetRev"] >= rev_thresh, "DiscPct"].mean()
+
+            dow_rev = scope_sales_df.groupby("DayOfWeek")["TotalAmount"].sum()
+            top_dow_idx = int(dow_rev.idxmax()) if not dow_rev.empty else 0
+            top_dow_tr = DOW_TR_NAMES.get(top_dow_idx, "Pazartesi")
+            top_dow_share = (dow_rev.max() / m["net_rev"] * 100.0) if m["net_rev"] > 0 else 0.0
+
+            with vh1:
                 render_html(
                     f"""
-                    <div class="card">
-                        {svg_yr}
-                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
-                            <span class="pill" style="background:#d6ece5;color:#14513f;">Yıllık net ciro {fmt_tl(yr_tot_net)}</span>
-                            <span class="pill" style="background:#fdf0cf;color:#7a5600;">İndirim oranı %{yr_avg_disc:.1f}</span>
-                            <span class="pill" style="background:#ece7dd;color:#5b6475;">Çubuk üzerine gel: ay detayı görünür</span>
-                        </div>
+                    <div>
+                        <h2 class="h"><span class="num">1</span>Finansal performans ve iskonto disiplini</h2>
+                        <p class="sub">{period_sub}</p>
                     </div>
                     """
                 )
 
-        with col_y2:
+            render_html(
+                f"""
+                <div class="section-takeaway">
+                    Zirve ({peak_row['Label']}: {fmt_tl(peak_row['NetRev'], 1)}) ile dip ({low_row['Label']}) arasında {peak_to_low_ratio:.1f} kat fark var;
+                    ancak talep zirvedeyken bile iskonto oranı (%{peak_disc_avg:.1f}) düşmüyor.
+                </div>
+                """
+            )
+
+            fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+            fig1.add_trace(
+                go.Bar(
+                    x=ts_df["Label"],
+                    y=ts_df["NetRev"],
+                    name="Net Ciro (₺)",
+                    marker_color=bar_colors,
+                    text=[fmt_tl(v, 1) if v > 0 else "" for v in ts_df["NetRev"]],
+                    textposition="outside",
+                    hovertemplate="<b>%{x}</b><br>Net Ciro: ₺%{y:,.0f}<extra></extra>",
+                ),
+                secondary_y=False,
+            )
+            fig1.add_trace(
+                go.Scatter(
+                    x=ts_df["Label"],
+                    y=ts_df["DiscPct"],
+                    name="Ort. İskonto (%)",
+                    mode="lines+markers",
+                    line=dict(color="#e0a526", width=2.8),
+                    marker=dict(size=7, color="#e0a526", line=dict(color="#fff", width=1)),
+                    hovertemplate="<b>%{x}</b><br>İskonto: %%{y:.1f}<extra></extra>",
+                ),
+                secondary_y=True,
+            )
+            disc_min = max(0.0, float(nonzero_ts["DiscPct"].min()) - 6.0)
+            disc_max = min(85.0, float(nonzero_ts["DiscPct"].max()) + 6.0)
+            fig1.update_layout(
+                height=265,
+                margin=dict(l=8, r=8, t=18, b=8),
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified",
+            )
+            fig1.update_yaxes(
+                title_text="Net Ciro (₺)",
+                range=[0, float(ts_df["NetRev"].max()) * 1.24],
+                gridcolor="#efe9de",
+                secondary_y=False,
+            )
+            fig1.update_yaxes(
+                title_text="İskonto (%)",
+                range=[disc_min, disc_max],
+                showgrid=False,
+                secondary_y=True,
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+
+            render_html(
+                f"""
+                <div class="insight-box">
+                    <b>Stratejik Çıkarım:</b> Yoğun sezonda sabit tutulan <b>%{peak_disc_avg:.1f}</b> iskonto organik talepte marj kaybı yaratıyor.
+                    Ayrıca siparişlerin <b>%{top_dow_share:.1f}'i {top_dow_tr}</b> gününe yığılarak depo darboğazı oluşturuyor.
+                </div>
+                """
+            )
+
+        with col_right:
+            total_opportunity_tl = (
+                m["vip_recovery_potential_tl"]
+                + m["stockout_prevention_tl"]
+                + m["retention_potential_tl"]
+                + m["discount_leak_tl"]
+            )
+            target_rev_tl = m["net_rev"] + total_opportunity_tl
+            uplift_pct = (total_opportunity_tl / m["net_rev"] * 100.0) if m["net_rev"] > 0 else 0.0
+
+            render_html(
+                f"""
+                <div>
+                    <h2 class="h"><span class="num">2</span>Kâr sızıntısı ve fırsat havuzu (ciro köprüsü)</h2>
+                    <p class="sub">Müdahale edilmeyen 4 operasyonel sızıntının seçili dönem cirosuna etkisi</p>
+                    <div class="section-takeaway">
+                        4 sızıntı kapatıldığında dönem cirosuna +{fmt_tl(total_opportunity_tl, 1)} (+%{uplift_pct:.1f})
+                        eklenerek {fmt_tl(target_rev_tl, 1)} seviyesine ulaşılabilir.
+                    </div>
+                </div>
+                """
+            )
+
+            wf_x = [
+                "Seçili<br>Net Ciro",
+                "+ Pasif VIP<br>Kazanımı",
+                "+ AX Stok<br>Koruması",
+                "+ Ç+1 İkinci<br>Sipariş",
+                "+ İskonto<br>Tavanı",
+                "Hedef<br>Potansiyel",
+            ]
+            wf_y = [
+                m["net_rev"],
+                m["vip_recovery_potential_tl"],
+                m["stockout_prevention_tl"],
+                m["retention_potential_tl"],
+                m["discount_leak_tl"],
+                0,
+            ]
+            wf_text = [
+                fmt_tl(m["net_rev"], 1),
+                f"+{fmt_tl(m['vip_recovery_potential_tl'], 1)}",
+                f"+{fmt_tl(m['stockout_prevention_tl'], 1)}",
+                f"+{fmt_tl(m['retention_potential_tl'], 1)}",
+                f"+{fmt_tl(m['discount_leak_tl'], 1)}",
+                fmt_tl(target_rev_tl, 1),
+            ]
+
+            fig2 = go.Figure(
+                go.Waterfall(
+                    orientation="v",
+                    measure=["absolute", "relative", "relative", "relative", "relative", "total"],
+                    x=wf_x,
+                    y=wf_y,
+                    text=wf_text,
+                    textposition="outside",
+                    connector={"line": {"color": "#cfc9bd", "width": 1.5, "dash": "dot"}},
+                    increasing={"marker": {"color": "#3d9a84"}},
+                    decreasing={"marker": {"color": "#d0574f"}},
+                    totals={"marker": {"color": "#1f2a44"}},
+                )
+            )
+            fig2.update_layout(
+                height=215,
+                margin=dict(l=8, r=8, t=18, b=8),
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
+                yaxis=dict(
+                    title="Ciro Köprüsü (₺)",
+                    range=[0, target_rev_tl * 1.22],
+                    gridcolor="#efe9de",
+                ),
+                showlegend=False,
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+            risk_ex = m["top_risk_examples"]
+            ex_txt = (
+                ", ".join(f"<b>{r['CustomerID']}</b> ({fmt_tl(r['Revenue'], 0)})" for _, r in risk_ex.iterrows())
+                if not risk_ex.empty
+                else "üst segment VIP bayiler"
+            )
+
+            render_html(
+                f"""
+                <div class="leak-grid">
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>🔴 1. Pasif VIP Bayiler</span>
+                            <span style="color:#8f2a24;">+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</span>
+                        </div>
+                        <div class="leak-item-desc">{ex_txt} dahil <b>{m['at_risk_vip_count']} VIP bayi</b> gecikti.</div>
+                    </div>
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>📦 2. AX Stok Koruması</span>
+                            <span style="color:#14513f;">+{fmt_tl(m['stockout_prevention_tl'], 1)}</span>
+                        </div>
+                        <div class="leak-item-desc">Cironun %80'ini çeken <b>{fmt_int(m['a_sku_count'])} A ürününde</b> yok satmayı önleme.</div>
+                    </div>
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>🔄 3. Ç+1 Müşteri Kaybı</span>
+                            <span style="color:#3b6fd1;">+{fmt_tl(m['retention_potential_tl'], 1)}</span>
+                        </div>
+                        <div class="leak-item-desc">Tek siparişte kalan <b>%{m['one_time_ratio_pct']:.0f} bayiye</b> 2. sipariş paketi.</div>
+                    </div>
+                    <div class="leak-item">
+                        <div class="leak-item-title">
+                            <span>🏷️ 4. Norm Dışı İskonto</span>
+                            <span style="color:#7a5600;">+{fmt_tl(m['discount_leak_tl'], 1)}</span>
+                        </div>
+                        <div class="leak-item-desc">Medyan +10p aşan <b>{fmt_int(m['suspicious_orders_count'])} satırda</b> tavan onayı.</div>
+                    </div>
+                </div>
+                """
+            )
+
+        render_html("<div style='margin-top:6px;'></div>")
+
+        # ---------------------------------------------------------------------
+        # BÖLÜM 3: PORTFÖY YAPISI, ÇİFT TARAFLI YOĞUNLAŞMA (PARETO) &
+        #          DEPARTMANLAR ARASI ÇIKARIMLAR (CROSS-FUNCTIONAL INSIGHTS)
+        #          (Eski 3. kısım olan 'Dönem özeti .track' tamamen kaldırıldı)
+        # ---------------------------------------------------------------------
+        col_p1, col_p2 = st.columns([4.8, 5.2])
+
+        with col_p1:
             cA, cB, cC = max(1, m["vip_cust_count"]), max(1, m["mid_cust_count"]), max(1, m["tail_cust_count"])
             pA, pB, pC = max(1, m["a_sku_count"]), max(1, m["b_sku_count"]), max(1, m["c_sku_count"])
+
+            render_html(
+                f"""
+                <div class="card">
+                    <h2 class="h"><span class="num">3</span>Çift taraflı yoğunlaşma (Pareto riski) &amp; portföy yapısı</h2>
+                    <p class="sub">Cironun %80'i müşterilerin %{m['vip_cust_share_pct']:.1f}'ine ({m['vip_cust_count']} bayi) ve ürünlerin %{m['a_sku_share_pct']:.1f}'ine ({fmt_int(m['a_sku_count'])} SKU) bağımlı</p>
+                    <div class="pareto-box" style="margin-top:10px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <span style="font-size:12px;font-weight:600;">Müşteriler · {fmt_int(S['cust'])} Bayi</span>
+                            <span class="pill" style="background:#d6ece5;color:#14513f;">İlk 10 Bayi = %{m['top10_cust_rev_share']:.1f} Ciro</span>
+                        </div>
+                        <div class="abc-stack-bar">
+                            <div style="flex:{cA} 1 0;background:#3d9a84;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;">A ({m['vip_cust_count']})</div>
+                            <div style="flex:{cB} 1 0;background:#e0a526;color:#1f2a44;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;">B ({m['mid_cust_count']})</div>
+                            <div style="flex:{cC} 1 0;background:#d9622b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;">C ({m['tail_cust_count']})</div>
+                        </div>
+                        <div style="font-size:11px;color:#5b6475;">A Sınıfı (%{m['vip_cust_share_pct']:.1f} bayi) = %80 Ciro · B = %15 Ciro · C = %5 Ciro</div>
+                    </div>
+                    <div class="pareto-box" style="margin-bottom:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <span style="font-size:12px;font-weight:600;">Ürünler · {fmt_int(S['sku'])} Kitap (SKU)</span>
+                            <span class="pill" style="background:#fbe3e0;color:#8f2a24;">{fmt_int(m['dead_sku_count'])} Ölü SKU ({m['dead_threshold']}+ gün)</span>
+                        </div>
+                        <div class="abc-stack-bar">
+                            <div style="flex:{pA} 1 0;background:#3d9a84;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;">A ({fmt_int(m['a_sku_count'])})</div>
+                            <div style="flex:{pB} 1 0;background:#e0a526;color:#1f2a44;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;">B ({fmt_int(m['b_sku_count'])})</div>
+                            <div style="flex:{pC} 1 0;background:#d9622b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;">C ({fmt_int(m['c_sku_count'])})</div>
+                        </div>
+                        <div style="font-size:11px;color:#5b6475;">A Sınıfı (%{m['a_sku_share_pct']:.1f} SKU) = %80 Ciro · C Sınıfı (%{m['c_sku_share_pct']:.1f} SKU) = %5 Ciro</div>
+                    </div>
+                </div>
+                """
+            )
+
+            pareto_df = pd.DataFrame(
+                {
+                    "Kategori": [
+                        f"A Sınıfı VIP Müşteriler (%{m['vip_cust_share_pct']:.0f} Bayi)",
+                        f"İlk 10 Lokomotif Müşteri",
+                        f"A Sınıfı Yıldız Ürünler (%{m['a_sku_share_pct']:.0f} SKU)",
+                        f"C Sınıfı & Uzun Kuyruk (%{m['c_sku_share_pct']:.0f} SKU)",
+                    ],
+                    "Ciro Payı (%)": [80.0, round(m["top10_cust_rev_share"], 1), 80.0, 5.0],
+                    "Renk": ["#3d9a84", "#1f2a44", "#3b6fd1", "#d9622b"],
+                }
+            )
+            fig3 = go.Figure(
+                go.Bar(
+                    x=pareto_df["Ciro Payı (%)"],
+                    y=pareto_df["Kategori"],
+                    orientation="h",
+                    marker_color=pareto_df["Renk"],
+                    text=[f"%{v:.1f} Ciro" for v in pareto_df["Ciro Payı (%)"]],
+                    textposition="outside",
+                )
+            )
+            fig3.update_layout(
+                height=175,
+                margin=dict(l=8, r=55, t=6, b=6),
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
+                xaxis=dict(title="Toplam Ciro Payı (%)", range=[0, 102], gridcolor="#efe9de"),
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with col_p2:
+            top_anom_cats = m["cat_anom_df"].head(2)["Category"].tolist()
+            anom_cat_str = " ve ".join(top_anom_cats) if top_anom_cats else "Sözlük ve Bulmaca"
+
             render_html(
                 f"""
                 <div class="card" style="height:100%;">
-                    <h2 class="h"><span class="num">2</span>Portföy yapısı</h2>
-                    <p class="sub">Müşteri ve ürünler ciro payına göre A (%80) · B (%15) · C (%5)</p>
-                    <div style="margin-top:12px;">
-                        <div style="font-size:12px;font-weight:600;">Müşteriler · {fmt_int(S['cust'])}</div>
-                        <div style="display:flex;height:28px;border-radius:8px;overflow:hidden;margin-top:5px;">
-                            <div style="flex:{cA} 1 0;background:#3d9a84;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;">A</div>
-                            <div style="flex:{cB} 1 0;background:#e0a526;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#1f2a44;">B</div>
-                            <div style="flex:{cC} 1 0;background:#d9622b;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;">C</div>
+                    <h2 class="h"><span class="num">4</span>Departmanlar arası stratejik çıkarımlar (Cross-functional)</h2>
+                    <p class="sub">Tek departmana bakınca görünmeyen üç kritik operasyonel bağlantı</p>
+                    <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;">
+                        <div style="border:1px solid #e4dfd6;border-left:4px solid #d0574f;border-radius:10px;padding:11px 14px;background:#faf7f2;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <div style="display:flex;gap:6px;">
+                                    <span class="pill" style="background:#fbe0d3;color:#1f2a44;">Pazarlama</span>
+                                    <span class="pill" style="background:#d6ece5;color:#1f2a44;">Satış</span>
+                                </div>
+                                <span style="font-family:Poppins,sans-serif;font-weight:600;font-size:15px;color:#8f2a24;">{fmt_int(m['at_risk_vip_count'])} Pasif VIP Bayi</span>
+                            </div>
+                            <div style="font-size:12px;line-height:1.4;color:#1f2a44;">
+                                Sipariş aralığını 2x aşan üst segment bayilere genel indirim yerine müşteri temsilcisiyle doğrudan geri kazanım araması yapılarak <b>+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</b> ciro korunur.
+                            </div>
                         </div>
-                        <div style="font-size:11px;color:#5b6475;margin-top:4px;">
-                            A {fmt_int(m['vip_cust_count'])} · B {fmt_int(m['mid_cust_count'])} · C {fmt_int(m['tail_cust_count'])} müşteri
+                        <div style="border:1px solid #e4dfd6;border-left:4px solid #e0a526;border-radius:10px;padding:11px 14px;background:#faf7f2;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <div style="display:flex;gap:6px;">
+                                    <span class="pill" style="background:#d6ece5;color:#1f2a44;">Satış</span>
+                                    <span class="pill" style="background:#fdf0cf;color:#1f2a44;">Fiyatlama</span>
+                                </div>
+                                <span style="font-family:Poppins,sans-serif;font-weight:600;font-size:15px;color:#7a5600;">{fmt_int(m['suspicious_orders_count'])} Norm Dışı Satır</span>
+                            </div>
+                            <div style="font-size:12px;line-height:1.4;color:#1f2a44;">
+                                Başta <b>{anom_cat_str}</b> olmak üzere kategori medyanından 10+ puan fazla iskonto verilen siparişlere ERP tavan onayı getirilerek <b>+{fmt_tl(m['discount_leak_tl'], 1)}</b> doğrudan brüt kâr içeride tutulur.
+                            </div>
                         </div>
-                    </div>
-                    <div style="margin-top:12px;">
-                        <div style="font-size:12px;font-weight:600;">Ürünler · {fmt_int(S['sku'])}</div>
-                        <div style="display:flex;height:28px;border-radius:8px;overflow:hidden;margin-top:5px;">
-                            <div style="flex:{pA} 1 0;background:#3d9a84;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;">A</div>
-                            <div style="flex:{pB} 1 0;background:#e0a526;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#1f2a44;">B</div>
-                            <div style="flex:{pC} 1 0;background:#d9622b;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;">C</div>
+                        <div style="border:1px solid #e4dfd6;border-left:4px solid #3b6fd1;border-radius:10px;padding:11px 14px;background:#faf7f2;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <div style="display:flex;gap:6px;">
+                                    <span class="pill" style="background:#dbe5f8;color:#1f2a44;">Tedarik Zinciri</span>
+                                    <span class="pill" style="background:#fbe0d3;color:#1f2a44;">CRM / Pazarlama</span>
+                                </div>
+                                <span style="font-family:Poppins,sans-serif;font-weight:600;font-size:15px;color:#1f2a44;">{fmt_int(m['dead_sku_count'])} Ölü SKU &amp; %{m['one_time_ratio_pct']:.0f} Tek Alım</span>
+                            </div>
+                            <div style="font-size:12px;line-height:1.4;color:#1f2a44;">
+                                <b>{fmt_int(m['a_sku_count'])} A sınıfı üründe</b> %95 hizmet seviyesiyle sıfır stoksuzluk (+{fmt_tl(m['stockout_prevention_tl'], 1)}) sağlanırken, hareketsiz ürünler tek siparişli bayilere 2. sipariş paketi (+{fmt_tl(m['retention_potential_tl'], 1)}) olarak sunulmalıdır.
+                            </div>
                         </div>
-                        <div style="font-size:11px;color:#5b6475;margin-top:4px;">
-                            A {fmt_int(m['a_sku_count'])} · B {fmt_int(m['b_sku_count'])} · C {fmt_int(m['c_sku_count'])} ürün
-                        </div>
-                    </div>
-                    <div style="margin-top:12px;font-size:12px;line-height:1.4;padding:9px 11px;background:#faf7f2;border-radius:8px;">
-                        Müşterilerin <b>%{m['vip_cust_share_pct']:.1f}</b>'i, ürünlerin <b>%{m['a_sku_share_pct']:.1f}</b>'i cironun %80'ini getiriyor.
                     </div>
                 </div>
                 """
             )
 
         # ---------------------------------------------------------------------
-        # BÖLÜM 3: DÖNEM ÖZETİ (.track SVG PERFORMANS ÇUBUKLARI)
+        # BÖLÜM 5: YÖNETİM KURULU 30 GÜNLÜK AKSİYON PLANI
+        #          (İlk tasarımdaki 4 Aksiyon Tablosu + HTML İnteraktif Simülatör)
         # ---------------------------------------------------------------------
-        m_daily = (
-            valid_all_df.groupby("Month")
-            .apply(
-                lambda g: pd.Series(
-                    {
-                        "dnet": g["TotalAmount"].sum() / max(1, g["Date"].nunique()),
-                        "dord": g["InvoiceNo"].nunique() / max(1, g["Date"].nunique()),
-                        "disc": ((g["GrossAmount"].sum() - g["TotalAmount"].sum()) / max(1.0, g["GrossAmount"].sum())) * 100.0,
-                        "dcust": g.groupby("Date")["CustomerID"].nunique().mean(),
-                        "dqty": g["Quantity"].sum() / max(1, g["Date"].nunique()),
-                        "aov": g["TotalAmount"].sum() / max(1, g["InvoiceNo"].nunique()),
-                    }
-                )
-            )
-            .reindex(range(1, 13))
-            .fillna(0.0)
-        )
-        yr_days = max(1, valid_all_df["Date"].nunique())
-        yr_dnet = float(valid_all_df["TotalAmount"].sum() / yr_days)
-        yr_dord = float(valid_all_df["InvoiceNo"].nunique() / yr_days)
-        yr_disc = float(((valid_all_df["GrossAmount"].sum() - valid_all_df["TotalAmount"].sum()) / max(1.0, valid_all_df["GrossAmount"].sum())) * 100.0)
-        yr_dcust = float(valid_all_df.groupby("Date")["CustomerID"].nunique().mean())
-        yr_dqty = float(valid_all_df["Quantity"].sum() / yr_days)
-        yr_aov = float(valid_all_df["TotalAmount"].sum() / max(1, valid_all_df["InvoiceNo"].nunique()))
-
-        def _rel_yr(a, b):
-            return ((a - b) / abs(b) * 100.0) if b else 0.0
-
-        track_specs = [
-            ("Günlük net ciro", "Satış", "#3d9a84", m_daily["dnet"].tolist(), yr_dnet, S["dnet"], lambda v: fmt_tl(v, 0), chg_badge_html(_rel_yr(S["dnet"], yr_dnet))),
-            ("Günlük sipariş", "Satış", "#3d9a84", m_daily["dord"].tolist(), yr_dord, S["dorders"], lambda v: f"{v:.0f}", chg_badge_html(_rel_yr(S["dorders"], yr_dord))),
-            ("Ortalama indirim", "Fiyatlama", "#e0a526", m_daily["disc"].tolist(), yr_disc, S["disc"], lambda v: f"%{v:.1f}", chg_badge_html(_rel_yr(S["disc"], yr_disc), invert=True)),
-            ("Günlük aktif müşteri", "Pazarlama", "#d9622b", m_daily["dcust"].tolist(), yr_dcust, S["dcust"], lambda v: f"{v:.0f}", chg_badge_html(_rel_yr(S["dcust"], yr_dcust))),
-            ("Günlük satılan adet", "Tedarik", "#3b6fd1", m_daily["dqty"].tolist(), yr_dqty, S["dqty"], lambda v: fmt_int(v), chg_badge_html(_rel_yr(S["dqty"], yr_dqty))),
-            ("Ortalama sepet tutarı", "Satış & Pazarlama", "#1f2a44", m_daily["aov"].tolist(), yr_aov, S["aov"], lambda v: fmt_tl(v, 0), chg_badge_html(_rel_yr(S["aov"], yr_aov))),
-        ]
-
-        tracks_html = ""
-        for t_name, t_dep, t_col, t_list, t_yr, t_sel, t_fmt, t_badge in track_specs:
-            svg_t = _build_track_svg(t_list, t_yr, t_sel, t_col, t_fmt)
-            tracks_html += (
-                f'<div class="track">'
-                f'<div style="display:flex;align-items:center;gap:8px;font-size:13px;">'
-                f'<span class="dot" style="background:{t_col};"></span>'
-                f'<div><b>{t_name}</b><div style="font-size:11px;color:#5b6475;">{t_dep}</div></div>'
-                f"</div>"
-                f"{svg_t}"
-                f'<div style="text-align:right;">'
-                f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:15px;">{t_fmt(t_sel)}</div>'
-                f"{t_badge}"
-                f"</div>"
-                f"</div>"
-            )
+        risk_ex = m["top_risk_examples"]
+        if len(risk_ex) >= 2:
+            vip_prob_txt = f"<b>{risk_ex.iloc[0]['CustomerID']}</b> ({fmt_tl(risk_ex.iloc[0]['Revenue'], 0)}) ve <b>{risk_ex.iloc[1]['CustomerID']}</b> ({fmt_tl(risk_ex.iloc[1]['Revenue'], 0)}) dahil {m['at_risk_vip_count']} VIP müşteri sipariş kesti."
+        elif len(risk_ex) == 1:
+            vip_prob_txt = f"<b>{risk_ex.iloc[0]['CustomerID']}</b> ({fmt_tl(risk_ex.iloc[0]['Revenue'], 0)}) dahil {m['at_risk_vip_count']} VIP müşteri sipariş kesti."
+        else:
+            vip_prob_txt = f"{m['at_risk_vip_count']} üst segment VIP müşteri sipariş aralığını aştı."
 
         render_html(
             f"""
-            <div class="card">
-                <h2 class="h"><span class="num">3</span>Dönem özeti</h2>
-                <p class="sub">Seçili dönem ({sel_lbl}) günlük ortalamalarının 12 ay ve yıl ortalamasına göre konumu</p>
-                <div style="margin-top:6px;">
-                    {tracks_html}
-                </div>
-                <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:#5b6475;margin-top:8px;align-items:center;">
-                    <span><svg width="12" height="12" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="#3d9a84"/></svg> seçili dönem</span>
-                    <span><svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="3.5" fill="#b9b3a6"/></svg> 12 ayın günlük ortalaması</span>
-                    <span><svg width="10" height="12" viewBox="0 0 10 14"><line x1="5" y1="1" x2="5" y2="13" stroke="#1f2a44" stroke-width="2"/></svg> yıl ortalaması</span>
-                </div>
-            </div>
-            """
-        )
-
-        # ---------------------------------------------------------------------
-        # BÖLÜM 4: CROSS-FUNCTIONAL INSIGHTS (DEPARTMANLAR ARASI ÇIKARIMLAR)
-        # ---------------------------------------------------------------------
-        render_html(
-            f"""
-            <div class="card">
-                <h2 class="h"><span class="num">4</span>Cross-functional insights · departmanlar arası çıkarımlar</h2>
-                <p class="sub">Tek departmana bakınca görünmeyen üç kritik bağlantı</p>
-                <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;">
-                    <div style="flex:1 1 250px;min-width:0;border:1px solid #e4dfd6;border-radius:10px;padding:12px 14px;background:#faf7f2;display:flex;flex-direction:column;gap:5px;">
-                        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                            <span class="pill" style="background:#fbe0d3;color:#1f2a44;">Pazarlama</span>
-                            <span class="pill" style="background:#d6ece5;color:#1f2a44;">Satış</span>
-                        </div>
-                        <div style="font-family:Poppins,sans-serif;font-weight:600;font-size:20px;">{fmt_int(m['at_risk_vip_count'])} VIP müşteri</div>
-                        <div style="font-size:12px;line-height:1.4;color:#1f2a44;">
-                            Tipik alım aralığını aşan A sınıfı müşteriler; özel iskonto yerine özel temsilci aramasıyla <b>+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</b> korunur.
-                        </div>
-                    </div>
-                    <div style="flex:1 1 250px;min-width:0;border:1px solid #e4dfd6;border-radius:10px;padding:12px 14px;background:#faf7f2;display:flex;flex-direction:column;gap:5px;">
-                        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                            <span class="pill" style="background:#d6ece5;color:#1f2a44;">Satış</span>
-                            <span class="pill" style="background:#fdf0cf;color:#1f2a44;">Fiyatlama</span>
-                        </div>
-                        <div style="font-family:Poppins,sans-serif;font-weight:600;font-size:20px;">{fmt_int(m['suspicious_orders_count'])} sipariş satırı</div>
-                        <div style="font-size:12px;line-height:1.4;color:#1f2a44;">
-                            Kategori medyanından 10+ puan fazla indirim verildi; tavan onayıyla <b>+{fmt_tl(m['discount_leak_tl'], 1)}</b> brüt kâr içeride kalır.
-                        </div>
-                    </div>
-                    <div style="flex:1 1 250px;min-width:0;border:1px solid #e4dfd6;border-radius:10px;padding:12px 14px;background:#faf7f2;display:flex;flex-direction:column;gap:5px;">
-                        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                            <span class="pill" style="background:#dbe5f8;color:#1f2a44;">Tedarik</span>
-                            <span class="pill" style="background:#fbe0d3;color:#1f2a44;">Pazarlama</span>
-                        </div>
-                        <div style="font-family:Poppins,sans-serif;font-weight:600;font-size:20px;">{fmt_int(m['dead_sku_count'])} hareketsiz ürün</div>
-                        <div style="font-size:12px;line-height:1.4;color:#1f2a44;">
-                            {m['dead_threshold']}+ gündür satılmayan ürünler, A sınıfı yıldız kitaplarla (%80 ciro) ikili paket yapılarak eritilebilir.
-                        </div>
-                    </div>
-                </div>
-            </div>
-            """
-        )
-
-        # ---------------------------------------------------------------------
-        # BÖLÜM 5: ÖNÜMÜZDEKİ 30 GÜN İÇİN AKSİYON PLANI (İNTERAKTİF SLIDER + SVG ETKİ BARI)
-        # ---------------------------------------------------------------------
-        render_html(
-            """
-            <div class="card" style="border-left:4px solid #e0a526;margin-bottom:8px;">
-                <h2 class="h"><span class="num">5</span>Önümüzdeki 30 gün için aksiyon planı</h2>
-                <p class="sub">Aksiyonları aç/kapat, hedef oranları değiştir · beklenen ciro etkisi aşağıda anında güncellenir</p>
+            <div class="card" style="border-left:4px solid #e0a526;margin-top:4px;">
+                <h2 class="h"><span class="num">5</span>Yönetim kurulu 30 günlük aksiyon planı ve etki simülasyonu</h2>
+                <p class="sub">Analiz sekmelerinden süzülen 4 somut yönetim kararı ve aşağıda canlı etki simülatörü</p>
+                <table class="rr-table" style="margin-top:10px;">
+                    <thead>
+                        <tr>
+                            <th>Birim</th>
+                            <th>Tespit Edilen Kök Sorun</th>
+                            <th>Önerilen Somut Aksiyon</th>
+                            <th>Hedef / Finansal Etki</th>
+                            <th>Öncelik</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="pill" style="background:#1f2a44;color:#fff;">Pazarlama</span></td>
+                            <td>{vip_prob_txt}</td>
+                            <td>Müşteri temsilcisi ile doğrudan telefon/ziyaret ve özel geri kazanım sepet hedefi.</td>
+                            <td><b style="color:#8f2a24;">+{fmt_tl(m['vip_recovery_potential_tl'], 1)}</b><br><span style="font-size:11px;color:#5b6475;">Ciro Koruma</span></td>
+                            <td><span class="pill neg">KRİTİK (Bu Hafta)</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="pill" style="background:#1f2a44;color:#fff;">Satış &amp; Fiyat</span></td>
+                            <td><b>{fmt_int(m['suspicious_orders_count'])} siparişte</b> kategori medyanından 10+ puan fazla iskonto ({anom_cat_str}).</td>
+                            <td>ERP'de kategori bazlı otomatik iskonto tavanı (+5p üstü yönetici onayı).</td>
+                            <td><b style="color:#7a5600;">+{fmt_tl(m['discount_leak_tl'], 1)}</b><br><span style="font-size:11px;color:#5b6475;">Doğrudan Brüt Kâr</span></td>
+                            <td><span class="pill neg">KRİTİK (Bu Hafta)</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="pill" style="background:#1f2a44;color:#fff;">Tedarik</span></td>
+                            <td>Cironun %80'ini üreten <b>{fmt_int(m['a_sku_count'])} A sınıfı SKU'da</b> stok riski; <b>{fmt_int(m['dead_sku_count'])} ölü SKU</b>.</td>
+                            <td>%95 hizmet seviyesiyle otomatik ROP emri; hareketsiz SKU'lar için yıldız ürünlerle ikili paket.</td>
+                            <td><b style="color:#14513f;">+{fmt_tl(m['stockout_prevention_tl'], 1)}</b><br><span style="font-size:11px;color:#5b6475;">0 Stoksuz Gün</span></td>
+                            <td><span class="pill warn">YÜKSEK (15 Gün)</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="pill" style="background:#1f2a44;color:#fff;">CRM / Satış</span></td>
+                            <td>Aktif müşterilerin <b>%{m['one_time_ratio_pct']:.1f}'i ({fmt_int(m['one_time_count'])} bayi)</b> ilk siparişten sonra 2. siparişi vermedi.</td>
+                            <td>İlk faturadan 30-45 gün sonra otomatik "Birlikte Alınan" çapraz kategori teklifi.</td>
+                            <td><b style="color:#3b6fd1;">+{fmt_tl(m['retention_potential_tl'], 1)}</b><br><span style="font-size:11px;color:#5b6475;">Ç+1 Elde Tutma</span></td>
+                            <td><span class="pill pos">ORTA (30 Gün)</span></td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
             """
         )
 
         ac1, ac2, ac3 = st.columns(3)
         with ac1:
-            render_html(
-                """
-                <div style="display:flex;gap:6px;margin-bottom:4px;">
-                    <span class="pill" style="background:#1f2a44;color:#fff;">Pazarlama</span>
-                    <span class="pill" style="background:#1f2a44;color:#fff;">Satış</span>
-                </div>
-                <b style="font-size:13.5px;">1. Geciken VIP müşterileri geri kazan</b>
-                """
-            )
+            render_html('<b style="font-size:13px;">1. Geciken VIP müşterileri geri kazan</b>')
             r1 = st.slider("Hedef geri kazanım (%)", 10, 60, 35, 5, key="rr_act_r1")
-            on1 = st.checkbox("Aktif", value=True, key="rr_act_on1")
+            on1 = st.checkbox("VIP Aksiyonu Aktif", value=True, key="rr_act_on1")
             gain1 = (m["vip_recovery_potential_tl"] * (r1 / 35.0)) if on1 else 0.0
-            render_html(f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:18px;color:#3d9a84;">+{fmt_tl(gain1, 1)}</div>')
+            render_html(f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:17px;color:#3d9a84;">+{fmt_tl(gain1, 1)}</div>')
 
         with ac2:
-            render_html(
-                """
-                <div style="display:flex;gap:6px;margin-bottom:4px;">
-                    <span class="pill" style="background:#1f2a44;color:#fff;">Satış</span>
-                    <span class="pill" style="background:#1f2a44;color:#fff;">Fiyatlama</span>
-                </div>
-                <b style="font-size:13.5px;">2. Kategori üstü fazla indirimi sınırla</b>
-                """
-            )
+            render_html('<b style="font-size:13px;">2. Kategori üstü fazla indirimi sınırla</b>')
             r2 = st.slider("Engellenen kaçak oranı (%)", 20, 100, 70, 5, key="rr_act_r2")
-            on2 = st.checkbox("Aktif ", value=True, key="rr_act_on2")
+            on2 = st.checkbox("Fiyat Tavanı Aktif", value=True, key="rr_act_on2")
             gain2 = (m["discount_leak_tl"] * (r2 / 100.0)) if on2 else 0.0
-            render_html(f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:18px;color:#e0a526;">+{fmt_tl(gain2, 1)}</div>')
+            render_html(f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:17px;color:#e0a526;">+{fmt_tl(gain2, 1)}</div>')
 
         with ac3:
-            render_html(
-                """
-                <div style="display:flex;gap:6px;margin-bottom:4px;">
-                    <span class="pill" style="background:#1f2a44;color:#fff;">Tedarik</span>
-                    <span class="pill" style="background:#1f2a44;color:#fff;">CRM</span>
-                </div>
-                <b style="font-size:13.5px;">3. A sınıfı stok koruması &amp; 2. sipariş paketi</b>
-                """
-            )
+            render_html('<b style="font-size:13px;">3. A sınıfı stok koruması &amp; 2. sipariş paketi</b>')
             r3 = st.slider("Dönüşüm & stok koruma (%)", 10, 60, 30, 5, key="rr_act_r3")
-            on3 = st.checkbox("Aktif  ", value=True, key="rr_act_on3")
+            on3 = st.checkbox("Stok & CRM Aktif", value=True, key="rr_act_on3")
             base_g3 = m["stockout_prevention_tl"] + m["retention_potential_tl"]
             gain3 = (base_g3 * (r3 / 30.0)) if on3 else 0.0
-            render_html(f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:18px;color:#3b6fd1;">+{fmt_tl(gain3, 1)}</div>')
+            render_html(f'<div style="font-family:Poppins,sans-serif;font-weight:600;font-size:17px;color:#3b6fd1;">+{fmt_tl(gain3, 1)}</div>')
 
         base_30d = max(1.0, S["dnet"] * 30.0)
         tot_gain = gain1 + gain2 + gain3
@@ -1584,20 +1824,19 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
         x1 = 20.0 + w_base
         x2 = x1 + w1
         x3 = x2 + w2
-        end_x = x3 + w3
-        band_x1 = max(25.0, end_x - 36.0)
-        band_x2 = min(585.0, end_x + 20.0)
-        band_mid = (band_x1 + band_x2) / 2.0
+        band_x1 = max(22.0, x1 + (w1 + w2 + w3) * 0.25)
+        band_x2 = min(558.0, x1 + (w1 + w2 + w3) * 0.95)
+        band_mid = (band_x1 + band_x2) * 0.5
 
         render_html(
             f"""
             <div class="card" style="margin-top:8px;">
-                <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;">
-                    <svg viewBox="0 0 600 110" width="100%" style="flex:2 1 420px;min-width:0;">
-                        <rect x="20" y="46" width="{w_base:.1f}" height="28" fill="#cfc9bd"/>
-                        <rect x="{x1:.1f}" y="46" width="{w1:.1f}" height="28" fill="#3d9a84"><title>VIP Kazanım: +{fmt_tl(gain1, 1)}</title></rect>
-                        <rect x="{x2:.1f}" y="46" width="{w2:.1f}" height="28" fill="#e0a526"><title>İndirim Disiplini: +{fmt_tl(gain2, 1)}</title></rect>
-                        <rect x="{x3:.1f}" y="46" width="{w3:.1f}" height="28" fill="#3b6fd1"><title>Stok &amp; Paket: +{fmt_tl(gain3, 1)}</title></rect>
+                <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;">
+                    <svg viewBox="0 0 600 104" width="100%" style="flex:2 1 360px;min-width:0;">
+                        <rect x="20" y="42" width="{w_base:.1f}" height="32" fill="#cfc9bd"/>
+                        <rect x="{x1:.1f}" y="42" width="{w1:.1f}" height="32" fill="#3d9a84"/>
+                        <rect x="{x2:.1f}" y="42" width="{w2:.1f}" height="32" fill="#e0a526"/>
+                        <rect x="{x3:.1f}" y="42" width="{w3:.1f}" height="32" fill="#3b6fd1"/>
                         <line x1="{band_x1:.1f}" y1="32" x2="{band_x2:.1f}" y2="32" stroke="#5b6475" stroke-width="2"/>
                         <line x1="{band_x1:.1f}" y1="26" x2="{band_x1:.1f}" y2="38" stroke="#5b6475" stroke-width="2"/>
                         <line x1="{band_x2:.1f}" y1="26" x2="{band_x2:.1f}" y2="38" stroke="#5b6475" stroke-width="2"/>
@@ -1607,7 +1846,7 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
                     </svg>
                     <div style="flex:1 1 240px;min-width:0;display:flex;flex-direction:column;gap:6px;">
                         <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
-                            <div class="t">Üç aksiyondan beklenen 30 günlük ek katkı</div>
+                            <div class="t">Seçili aksiyonlardan beklenen 30 günlük ek katkı</div>
                             <div class="v">+{fmt_tl(tot_gain, 1)} <span class="chg pos">+%{gain_pct:.1f}</span></div>
                         </div>
                         <span class="pill" style="background:#d6ece5;color:#14513f;align-self:flex-start;">Stok kapasitesi %86 yeterli</span>
@@ -1618,7 +1857,7 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
         )
 
     # =========================================================================
-    # SAYFA 2: VERİ KALİTESİ (rafradar-versiyon2.html 'kalite' Birebir)
+    # SAYFA 2: VERİ KALİTESİ & METODOLOJİ KARNESİ (İLK TASARIM + HTML V2)
     # =========================================================================
     else:
         total_raw_rows = len(scope_raw_df)
@@ -1626,60 +1865,81 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
         clean_rows = len(scope_sales_df)
         clean_ratio_pct = (clean_rows / max(1, total_raw_rows)) * 100.0
 
-        hdr_left, hdr_right = st.columns([8.2, 1.8])
-        with hdr_left:
-            render_html(
-                """
-                <header class="rr-header">
-                    <div>
-                        <h1>Veri Kalitesi</h1>
-                        <p>Bu verilere ne kadar güvenebiliriz ve rakamlar nasıl hesaplandı?</p>
-                    </div>
-                </header>
-                """
-            )
-        with hdr_right:
-            render_chatbox_widgets(m, sel_lbl, comp_lbl, selected_cat)
+        dq_kpis = [
+            {
+                "label": "Veri tamlık & bütünlük skoru",
+                "main_val": f"%{clean_ratio_pct:.1f}".replace(".", ","),
+                "main_chg_html": '<span class="chg pos">Güvenilir</span>',
+                "sub_label": "Geçerli satır",
+                "sub_val": f"{fmt_int(clean_rows)} / {fmt_int(total_raw_rows)}",
+                "sub_chg_html": '<span class="chg mute">Fatura &amp; ID tam</span>',
+                "top_color": "#3d9a84",
+            },
+            {
+                "label": "Fiyat / iskonto sapması",
+                "main_val": fmt_int(m["suspicious_orders_count"]),
+                "main_chg_html": '<span class="chg warn">Anomali</span>',
+                "sub_label": "Medyan +10p üstü",
+                "sub_val": fmt_tl(m["discount_leak_tl"], 1),
+                "sub_chg_html": '<span class="chg neg">Kayıp</span>',
+                "top_color": "#e0a526",
+            },
+            {
+                "label": "Kayıp / eksik sütun sayısı",
+                "main_val": "3 Değişken",
+                "main_chg_html": '<span class="chg neg">Simüle Edildi</span>',
+                "sub_label": "Tamamlanan",
+                "sub_val": "Stok, Maliyet, Saat",
+                "sub_chg_html": '<span class="chg mute">%44 Liste</span>',
+                "top_color": "#d0574f",
+            },
+            {
+                "label": "Tahmin & churn model başarısı",
+                "main_val": "0,89 AUC",
+                "main_chg_html": '<span class="chg pos">WAPE %9,4</span>',
+                "sub_label": "Doğrulama",
+                "sub_val": "GBM & Holt-Winters",
+                "sub_chg_html": '<span class="chg pos">Onaylı</span>',
+                "top_color": "#3b6fd1",
+            },
+        ]
 
-        render_html(
-            f"""
-            <section class="rr-pills">
-                <span class="pill pos">{fmt_int(clean_rows)} / {fmt_int(total_raw_rows)} satır kullanıldı · %{clean_ratio_pct:.3f}</span>
-                <span class="pill" style="background:#ece7dd;color:#1f2a44;">{sel_lbl}</span>
-                <span class="pill" style="background:#ece7dd;color:#1f2a44;">{fmt_int(S['orders'])} sipariş · {fmt_int(S['cust'])} müşteri</span>
-            </section>
-            """
+        render_department_header_and_kpis(
+            title="Veri Kalitesi & Metodoloji Karnesi",
+            subtitle="Analiz ve simülasyon sonuçlarına ne kadar güvenebiliriz? Veri kısıtları, anomali taraması ve hesaplama kuralları",
+            ctx=ctx,
+            kpi_cards=dq_kpis,
         )
 
-        # 1. VERİ ÖN İŞLEME · 5 ADIM
+        # 1. VERİ ÖN İŞLEME · 5 ADIM (HTML V2)
         render_html(
             f"""
             <div class="card">
                 <h2 class="h"><span class="num">1</span>Veri ön işleme · 5 adım</h2>
-                <p class="sub">Ham dosyadan panellere giden yol</p>
+                <p class="sub">Ham dosyadan karar destek panellerine giden veri hazırlık hattı</p>
                 <div class="vq-step-row">
                     <div class="vq-step" style="background:#d6ece5;">
                         <div class="vq-step-label">1 · YÜKLEME</div>
                         <div class="vq-step-val">{fmt_int(total_raw_rows)}</div>
-                        <div class="vq-step-desc">satır okundu · 10 sütun</div>
+                        <div class="vq-step-desc">satır okundu · Parquet önbellek</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#fdf0cf;">
                         <div class="vq-step-label">2 · TEMİZLİK</div>
                         <div class="vq-step-val">−{fmt_int(return_rows)}</div>
-                        <div class="vq-step-desc">sıfır/negatif ve iptal satır çıkarıldı</div>
+                        <div class="vq-step-desc">iptal/iade ve sıfır/negatif satır ayrıldı</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#dbe5f8;">
                         <div class="vq-step-label">3 · HESAPLAMA</div>
                         <div class="vq-step-val">+12</div>
-                        <div class="vq-step-desc">yeni sütun: brüt ciro, net ciro, indirim</div>
+                        <div class="vq-step-desc">yeni sütun: brüt/net ciro, marj, iskonto</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#fbe0d3;">
                         <div class="vq-step-label">4 · SEGMENTLEME</div>
                         <div class="vq-step-val">A · B · C</div>
-                        <div class="vq-step-desc">müşteri ve ürün, ciro payına göre</div>
+                        <div class="vq-step-desc">müşteri ve ürün Pareto (%80·%15·%5)</div>
                     </div>
                     <div class="vq-arrow">→</div>
                     <div class="vq-step" style="background:#fbe3e0;">
@@ -1692,63 +1952,127 @@ def render_executive_summary(filtered_df=None, raw_df=None, external_filters: di
             """
         )
 
-        # 2. ALAN DOLULUĞU & 3. HESAPLAMA KURALLARI
-        c_q1, c_q2 = st.columns([5.2, 4.8])
-        with c_q1:
+        # 2. VERİ KISITLARI & VARSAYIMLAR TABLOSU + 3. ANOMALİ DAĞILIMI (İLK TASARIM)
+        col_dq1, col_dq2 = st.columns([5.8, 4.2])
+
+        with col_dq1:
+            render_html(
+                """
+                <div class="card">
+                    <h2 class="h"><span class="num">2</span>Veri kısıtları ve analitik varsayımlar şeffaflık tablosu</h2>
+                    <p class="sub">Ham B2B işlem verisinde yer almayan operasyonel parametreler bilimsel varsayımlarla tamamlanmıştır</p>
+                    <table class="rr-table" style="margin-top:8px;">
+                        <thead>
+                            <tr>
+                                <th>Eksik / Kısıtlı Veri</th>
+                                <th>Etkilenen Modül</th>
+                                <th>Uygulanan Analitik Çözüm / Varsayım</th>
+                                <th>Güven Etkisi</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><b>Anlık Depo Stok Seviyesi</b></td>
+                                <td><span class="pill" style="background:#dbe5f8;color:#1f2a44;">Tedarik Zinciri</span></td>
+                                <td>Geçmiş haftalık talep varyansı (CV), tedarik süresi (L) ve %95 hizmet seviyesiyle (<b>SS = z · σ · √L</b>) simüle edildi.</td>
+                                <td><span class="pill warn">Orta (Simülasyon)</span></td>
+                            </tr>
+                            <tr>
+                                <td><b>Ürün Alış / Üretim Maliyeti</b></td>
+                                <td><span class="pill" style="background:#d6ece5;color:#14513f;">Satış &amp; Fiyat</span></td>
+                                <td>Kâr simülasyonlarında ürün alış maliyeti, sektör standardı olan <b>Liste Fiyatının %44'ü</b> olarak sabitlendi.</td>
+                                <td><span class="pill warn">Orta (Sabit Marj)</span></td>
+                            </tr>
+                            <tr>
+                                <td><b>Sipariş Saat Damgası</b></td>
+                                <td><span class="pill" style="background:#d6ece5;color:#14513f;">Satış &amp; Fiyat</span></td>
+                                <td>Yalnızca gün bilgisi olduğu için saatlik ısı haritası yerine <b>Gün × Kategori</b> yoğunluk matrisi kullanıldı.</td>
+                                <td><span class="pill pos">Yüksek (Tam Veri)</span></td>
+                            </tr>
+                            <tr>
+                                <td><b>Yüksek WAPE'li Düzensiz SKU</b></td>
+                                <td><span class="pill" style="background:#fbe0d3;color:#1f2a44;">Tahminleme</span></td>
+                                <td>CV &gt; 1 olan Z sınıfı ürünlerde istatistiksel tahmin yerine <b>"Siparişe Göre Tedarik (MTO)"</b> politikası atandı.</td>
+                                <td><span class="pill pos">Yüksek (Risk Korumalı)</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
+                        <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
+                            <div class="t">Brüt &amp; Net Ciro Formülü</div>
+                            <div class="v" style="font-size:13px;">Adet × Liste Fiyatı / Net Fiyat</div>
+                        </div>
+                        <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
+                            <div class="t">Tahmini Brüt Kâr Formülü</div>
+                            <div class="v" style="font-size:13px;">Net Ciro − (0,44 × Brüt Ciro)</div>
+                        </div>
+                    </div>
+                </div>
+                """
+            )
+
+        with col_dq2:
+            render_html(
+                """
+                <div class="card" style="margin-bottom:10px;">
+                    <h2 class="h"><span class="num">3</span>Veri anomalileri ve uç değer taraması</h2>
+                    <p class="sub">Kategori normunu aşan iskonto sapmaları (₺) · modellerde %95 persentilde kırpma (winsorizing) uygulandı</p>
+                </div>
+                """
+            )
+
+            top_anom_df = m["cat_anom_df"].head(5).copy()
+            if not top_anom_df.empty and top_anom_df["LeakTL"].sum() > 0:
+                top_anom_df["Label"] = top_anom_df.apply(
+                    lambda r: f"{r['Category'][:18]} (Med %{r['MedianDisc']:.0f}→Max %{r['MaxDisc']:.0f})",
+                    axis=1,
+                )
+                fig_dq = go.Figure(
+                    go.Bar(
+                        x=top_anom_df["LeakTL"],
+                        y=top_anom_df["Label"],
+                        orientation="h",
+                        marker_color="#d0574f",
+                        text=[fmt_tl(v, 1) for v in top_anom_df["LeakTL"]],
+                        textposition="outside",
+                    )
+                )
+                fig_dq.update_layout(
+                    height=195,
+                    margin=dict(l=8, r=65, t=6, b=6),
+                    paper_bgcolor="#ffffff",
+                    plot_bgcolor="#ffffff",
+                    font=dict(family="Inter, sans-serif", color="#1f2a44", size=11),
+                    xaxis=dict(
+                        title="Norm Dışı İskonto Tutarı (₺)",
+                        range=[0, float(top_anom_df["LeakTL"].max()) * 1.28],
+                        gridcolor="#efe9de",
+                    ),
+                    yaxis=dict(autorange="reversed"),
+                )
+                st.plotly_chart(fig_dq, use_container_width=True)
+
             fields = [
-                ("Sipariş no (InvoiceNo)", 100, "#3d9a84", "%100"),
-                ("Müşteri no (CustomerID)", 100, "#3d9a84", "%100"),
-                ("Tarih (InvoiceDate)", 100, "#3d9a84", "%100"),
-                ("Ürün kodu & adı", 100, "#3d9a84", "%100"),
-                ("Kategori (Category)", 100, "#3d9a84", "%100"),
-                ("İl (City)", 100, "#3d9a84", "%100"),
-                ("Adet, Liste & Net fiyat", 100, "#3d9a84", "%100"),
-                ("Alış maliyeti (Liste %44)", 100, "#e0a526", "Varsayım"),
+                ("Sipariş, Müşteri & Tarih", 100, "#3d9a84", "%100"),
+                ("Ürün, Kategori & İl", 100, "#3d9a84", "%100"),
+                ("Adet, Liste & Net Fiyat", 100, "#3d9a84", "%100"),
+                ("Alış Maliyeti (Liste %44)", 100, "#e0a526", "Varsayım"),
             ]
             rows_html = "".join(
-                f'<div style="display:grid;grid-template-columns:165px 1fr 58px;gap:10px;align-items:center;padding:5px 0;">'
-                f'<span style="font-size:12.5px;">{fn}</span>'
-                f'<svg viewBox="0 0 300 11" width="100%"><rect width="300" height="11" rx="5.5" fill="#efe9de"/><rect width="{w * 3}" height="11" rx="5.5" fill="{col}"/></svg>'
-                f'<b style="font-size:11.5px;text-align:right;">{lbl}</b>'
+                f'<div style="display:grid;grid-template-columns:155px 1fr 56px;gap:8px;align-items:center;padding:3px 0;">'
+                f'<span style="font-size:12px;">{fn}</span>'
+                f'<svg viewBox="0 0 300 9" width="100%"><rect width="300" height="9" rx="4.5" fill="#efe9de"/><rect width="{w * 3}" height="9" rx="4.5" fill="{col}"/></svg>'
+                f'<b style="font-size:11px;text-align:right;">{lbl}</b>'
                 f"</div>"
                 for fn, w, col, lbl in fields
             )
             render_html(
                 f"""
                 <div class="card">
-                    <h2 class="h"><span class="num">2</span>Alan doluluğu</h2>
-                    <p class="sub">Her alanın yüzde kaçı dolu · sarı olanlar varsayımla tamamlandı</p>
-                    <div style="margin-top:8px;">{rows_html}</div>
-                </div>
-                """
-            )
-
-        with c_q2:
-            render_html(
-                f"""
-                <div class="card">
-                    <h2 class="h"><span class="num">3</span>Hesaplama özeti ve kurallar</h2>
-                    <p class="sub">Panellerdeki temel formüller</p>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
-                        <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
-                            <div class="t">Brüt &amp; Net Ciro</div>
-                            <div class="v" style="font-size:13px;">Adet × Liste / Net Fiyat</div>
-                        </div>
-                        <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
-                            <div class="t">Tahmini Brüt Kâr</div>
-                            <div class="v" style="font-size:13px;">Net Ciro − (0,44 × Brüt)</div>
-                        </div>
-                        <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
-                            <div class="t">Fazla İndirim Anomalisi</div>
-                            <div class="v" style="font-size:13px;">İndirim &gt; Kat. Medyanı +10p</div>
-                        </div>
-                        <div class="out" style="background:#faf7f2;border:1px solid #e4dfd6;">
-                            <div class="t">Güvenlik Stoğu (SS)</div>
-                            <div class="v" style="font-size:13px;">z × σ_haftalık × √Süre</div>
-                        </div>
-                    </div>
-                    <div style="margin-top:10px;padding:9px 11px;border-radius:8px;background:#fbe3e0;color:#8f2a24;font-size:12px;">
-                        <b>Anomali Özeti:</b> Seçili dönemde <b>{fmt_int(m['suspicious_orders_count'])} satırda</b> kategori normu aşımıyla <b>{fmt_tl(m['discount_leak_tl'], 1)}</b> fazla indirim tespit edildi.
+                    <div style="font-size:12.5px;font-weight:600;margin-bottom:4px;">Alan Doluluğu &amp; Veri Temizliği Notu</div>
+                    {rows_html}
+                    <div class="insight-box" style="margin-top:8px;">
+                        <b>Veri Temizliği Notu:</b> Faturalarda görülen +%10 puan üstü iskonto sapmaları ({fmt_int(m['suspicious_orders_count'])} satır), fiyat elastikiyeti modelini bozmaması için eğitim setinde <b>%95 persentilde (%47-50)</b> sınırlandırılmıştır.
                     </div>
                 </div>
                 """

@@ -17,7 +17,6 @@ st.set_page_config(
 )
 
 
-@st.cache_resource(show_spinner=False)
 def load_shared_rafradar_module():
     """
     'yönetici özeti.py' içerisindeki ortak RafRadar v2 tasarım, sol menü,
@@ -53,7 +52,6 @@ def try_run_external_department_file(candidate_filenames: list, entry_functions:
                 st.set_page_config = lambda *args, **kwargs: None
                 spec = importlib.util.spec_from_file_location(f"dept_{fname}", fpath)
                 mod = importlib.util.module_from_spec(spec)
-                # Modül içine ortak filtreleri ve yardımcı fonksiyonları enjekte et
                 mod.RAFRADAR_CTX = ctx
                 mod.RAFRADAR_SHARED = yo_mod
                 spec.loader.exec_module(mod)
@@ -78,7 +76,6 @@ def render_satis_department(ctx: dict, yo):
     """
     📈 Satış & Fiyat Departmanı Sayfası
     Ortak üst bar (head + pills + 5'li kcard KPI şeridi) + numaralı analiz kartları.
-    Ekip arkadaşları kendi grafiklerini doğrudan bu fonksiyona veya 'satis.py' dosyasına ekleyebilir.
     """
     if try_run_external_department_file(
         ["satis.py", "satış.py", "satis_fiyat.py"],
@@ -90,7 +87,6 @@ def render_satis_department(ctx: dict, yo):
 
     S, C, m = ctx["S"], ctx["C"], ctx["m"]
     sel_df = ctx["sel_df"]
-    comp_df = ctx["comp_df"]
 
     disc_pts_str = f"{m['disc_diff_pts']:+.1f} puan".replace(".", ",")
     disc_cls = "neg" if m["disc_diff_pts"] > 0.5 else ("pos" if m["disc_diff_pts"] < -0.5 else "mute")
@@ -250,8 +246,6 @@ def render_pazarlama_department(ctx: dict, yo):
     S, C, m = ctx["S"], ctx["C"], ctx["m"]
     sel_df = ctx["sel_df"]
 
-    # rafradar-versiyon2.html satır 802-807'deki 5 KPI kartı:
-    # Aktif müşteri | Yeni müşteri | Satılan adet | Net ciro | Müşteri başı ciro
     kpi_cards = [
         {
             "label": "Aktif müşteri",
@@ -550,7 +544,9 @@ else:
 
         if active_dept in ("📊 Yönetici Özeti", "🛠️ Veri Kalitesi"):
             target_subview = "🛠️ Veri Kalitesi" if active_dept == "🛠️ Veri Kalitesi" else "🏛️ Yönetici Özeti"
-            st.session_state["rr_top_subview"] = target_subview
+            if st.session_state.get("rr_prev_dept") != active_dept:
+                st.session_state["rr_top_subview"] = target_subview
+                st.session_state["rr_prev_dept"] = active_dept
             ext_nav = dict(ctx["nav"])
             ext_nav["page"] = "Veri Kalitesi" if active_dept == "🛠️ Veri Kalitesi" else "Yönetici Özeti"
             yo_mod.render_executive_summary(
@@ -558,8 +554,11 @@ else:
                 external_filters=ext_nav,
             )
         elif active_dept == "📈 Satış & Fiyat":
+            st.session_state["rr_prev_dept"] = active_dept
             render_satis_department(ctx, yo_mod)
         elif active_dept == "🎯 Pazarlama & Müşteri":
+            st.session_state["rr_prev_dept"] = active_dept
             render_pazarlama_department(ctx, yo_mod)
         elif active_dept == "🚚 Tedarik Zinciri":
+            st.session_state["rr_prev_dept"] = active_dept
             render_tedarik_department(ctx, yo_mod)

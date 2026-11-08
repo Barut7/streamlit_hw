@@ -281,7 +281,7 @@ def _cevap_uret(soru: str, bilgi: dict, sayfa: str) -> str:
 
 
 def rafbot(bilgi: dict):
-    """Sağ altta yüzen (floating) RafBot · Veriye sor sohbet kutusunu oluşturur."""
+    """Sağ altta yüzen (floating) Ayraç AI · Veriye sor sohbet kutusunu oluşturur."""
     sayfa = _sayfa_tespit(bilgi)
     ss = st.session_state
     ss.setdefault(
@@ -289,7 +289,7 @@ def rafbot(bilgi: dict):
         [
             {
                 "role": "assistant",
-                "text": "Merhaba! Ben <b>RafBot</b>. Bu sayfadaki veriler, müşteri kodları (örn. <code>S00172</code>), şehirler, kategoriler veya ürünler hakkında bana soru sorabilir ya da aşağıdaki hazır başlıklara tıklayabilirsin.",
+                "text": "Merhaba! Ben <b>Ayraç AI</b> 🔖 — RafRadar'ın akıllı kitap &amp; kırtasiye karar asistanıyım. Bu sayfadaki veriler, müşteri kodları (örn. <code>S00172</code>), şehirler, kategoriler veya ürünler hakkında bana soru sorabilir ya da hazır başlıklara tıklayabilirsin.",
             }
         ],
     )
@@ -372,11 +372,11 @@ def rafbot(bilgi: dict):
         unsafe_allow_html=True,
     )
 
-    with st.popover("💬 RafBot · Veriye sor"):
+    with st.popover("🔖 Ayraç AI · Veriye sor"):
         st.markdown(
             "<div class='rb-header'>"
-            "<div><div class='rb-title'>💬 RafBot · Veriye sor</div>"
-            "<div class='rb-sub'>Canlı B2B veri asistanı · Müşteri, il, kategori ve ürün sorgulama</div></div>"
+            "<div><div class='rb-title'>🔖 Ayraç AI · Veriye sor</div>"
+            "<div class='rb-sub'>Kitap &amp; Kırtasiye B2B Akıllı Karar Asistanı</div></div>"
             "</div>",
             unsafe_allow_html=True,
         )

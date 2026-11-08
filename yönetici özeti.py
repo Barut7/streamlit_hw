@@ -1286,6 +1286,7 @@ def sayfa_kalite():
     tum = data.veri()
     kal = st.session_state.get("kalite") or {}
     ui.baslik("Veri Kalitesi", "Bu verilere ne kadar güvenebiliriz ve rakamlar nasıl hesaplandı?")
+    ui.filtreler(tum)
 
 
     @st.cache_data(show_spinner="Norm aşımı hesaplanıyor…")
@@ -1419,8 +1420,14 @@ pazarlama = st.Page(sayfa_pazarlama, title="Pazarlama & Müşteri", icon="🎯",
 tedarik = st.Page(sayfa_tedarik, title="Tedarik Zinciri", icon="📦", url_path="tedarik")
 kalite = st.Page(sayfa_kalite, title="Veri Kalitesi", icon="🔍", url_path="kalite")
 
-if "df" not in st.session_state:
-    pg = st.navigation([yukle, yonetici, satis, pazarlama, tedarik, kalite], position="hidden")
-else:
-    pg = st.navigation([yonetici, satis, pazarlama, tedarik, kalite, yukle])
+st.session_state["_sayfa_nesneleri"] = {
+    "yukle": yukle,
+    "yonetici": yonetici,
+    "satis": satis,
+    "pazarlama": pazarlama,
+    "tedarik": tedarik,
+    "kalite": kalite,
+}
+
+pg = st.navigation([yonetici, satis, pazarlama, tedarik, kalite, yukle], position="hidden")
 pg.run()

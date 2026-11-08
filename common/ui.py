@@ -98,7 +98,8 @@ def _inject_css(aktif_sayfa: str = ""):
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
         <style>
-        :root {{
+        :root, html, body, .stApp {{
+            color-scheme: light !important;
             --bg: #f6f3ee;
             --fg: #1f2a44;
             --muted: #5b6475;
@@ -110,36 +111,54 @@ def _inject_css(aktif_sayfa: str = ""):
             --red: #d0574f;
             --orange: #d9622b;
             --blue: #3b6fd1;
+            --primary-color: #3d9a84;
+            --background-color: #f6f3ee;
+            --secondary-background-color: #faf7f2;
+            --text-color: #1f2a44;
         }}
         .stApp {{
             background-color: var(--bg) !important;
-            color: var(--fg);
+            color: var(--fg) !important;
             font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }}
+        /* Üstteki beyaz Share bandını şeffaf yap ki sayfa başlığını kapatmasın */
+        header[data-testid="stHeader"] {{
+            background: transparent !important;
+            background-color: transparent !important;
+            border-bottom: none !important;
+            box-shadow: none !important;
+            height: 2.2rem !important;
+            pointer-events: none !important;
+        }}
+        header[data-testid="stHeader"] * {{
+            pointer-events: auto !important;
         }}
         /* Varsayılan Streamlit sayfa menüsünü gizle (kendi HTML birebir menümüzü kullanıyoruz) */
         [data-testid="stSidebarNav"] {{
             display: none !important;
         }}
         .block-container {{
-            padding-top: 1.5rem !important;
-            padding-bottom: 4.5rem !important;
+            padding-top: 2.6rem !important;
+            padding-bottom: 5rem !important;
             max-width: 1440px !important;
         }}
         section[data-testid="stSidebar"] {{
             background-color: #faf7f2 !important;
             border-right: 1px solid #e4dfd6 !important;
-            min-width: 268px !important;
-            max-width: 282px !important;
+            min-width: 282px !important;
+            max-width: 296px !important;
         }}
         section[data-testid="stSidebar"] .block-container {{
             padding: 1.1rem 0.9rem 1.5rem 0.9rem !important;
         }}
-        /* Sol menüdeki sayfa butonları (büyütülmüş punto ve temsili ikonlar) */
+        /* Sol menüdeki sayfa butonları (sola hizalı, büyütülmüş punto ve temsili ikonlar) */
         section[data-testid="stSidebar"] div.stButton > button {{
-            width: 100%;
+            width: 100% !important;
+            display: flex !important;
             text-align: left !important;
             justify-content: flex-start !important;
-            padding: 8px 11px !important;
+            align-items: center !important;
+            padding: 8px 12px !important;
             min-height: 40px !important;
             border-radius: 9px !important;
             border: 1px solid transparent !important;
@@ -150,6 +169,13 @@ def _inject_css(aktif_sayfa: str = ""):
             font-weight: 500 !important;
             box-shadow: none !important;
             margin: 2px 0 !important;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button > div,
+        section[data-testid="stSidebar"] div.stButton > button [data-testid="stMarkdownContainer"] {{
+            display: flex !important;
+            justify-content: flex-start !important;
+            text-align: left !important;
+            width: 100% !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button:hover {{
             background: rgba(31, 42, 68, 0.06) !important;
@@ -165,10 +191,26 @@ def _inject_css(aktif_sayfa: str = ""):
             color: #1f2a44 !important;
             margin: 0 !important;
             line-height: 1.3 !important;
+            text-align: left !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button[kind="primary"] p {{
             font-size: 15px !important;
             font-weight: 600 !important;
+        }}
+        /* Tüm açılır menü, selectbox, popover ve inputları her zaman açık (light) temada zorla */
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        div[data-baseweb="base-input"],
+        div[data-baseweb="popover"],
+        ul[data-baseweb="menu"],
+        li[role="option"] {{
+            background-color: #ffffff !important;
+            color: #1f2a44 !important;
+        }}
+        div[data-baseweb="select"] span,
+        div[data-baseweb="select"] div,
+        div[data-baseweb="input"] input {{
+            color: #1f2a44 !important;
         }}
         /* Sol menü selectbox ve date_input kutularını HTML tasarımla eşitle */
         section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
@@ -182,19 +224,20 @@ def _inject_css(aktif_sayfa: str = ""):
         /* Tarih kutularındaki (stDateInput) sayı puntolarını küçült ve iç boşluğu daralt ki tam sığsın */
         section[data-testid="stSidebar"] [data-testid="stDateInput"] div[data-baseweb="input"],
         section[data-testid="stSidebar"] [data-testid="stDateInput"] div[data-baseweb="base-input"] {{
-            padding: 0 4px !important;
+            padding: 0 2px !important;
             min-height: 31px !important;
         }}
         section[data-testid="stSidebar"] [data-testid="stDateInput"] input {{
-            font-size: 11px !important;
-            padding: 3px 2px !important;
-            letter-spacing: -0.02em !important;
+            font-size: 10.5px !important;
+            padding: 2px 1px !important;
+            letter-spacing: -0.03em !important;
             text-align: center !important;
             color: #1f2a44 !important;
             font-weight: 500 !important;
+            width: 100% !important;
         }}
         section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {{
-            gap: 6px !important;
+            gap: 5px !important;
         }}
         section[data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {{
             font-size: 12px !important;

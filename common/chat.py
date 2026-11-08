@@ -300,8 +300,8 @@ def rafbot(bilgi: dict):
         <style>
         div[data-testid="stPopover"] {
             position: fixed !important;
-            right: 22px !important;
-            bottom: 20px !important;
+            right: 24px !important;
+            bottom: 54px !important;
             z-index: 999990 !important;
             width: auto !important;
         }

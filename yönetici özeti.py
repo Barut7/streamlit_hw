@@ -1255,11 +1255,11 @@ def _inject_css(aktif_sayfa: str = ""):
         section[data-testid="stSidebar"] {{
             background-color: #faf7f2 !important;
             border-right: 1px solid #e4dfd6 !important;
-            min-width: 282px !important;
-            max-width: 296px !important;
+            min-width: 295px !important;
+            max-width: 310px !important;
         }}
         section[data-testid="stSidebar"] .block-container {{
-            padding: 1.1rem 0.9rem 1.5rem 0.9rem !important;
+            padding: 1.1rem 0.75rem 1.5rem 0.75rem !important;
         }}
         /* Sol menüdeki sayfa butonları (sola hizalı, büyütülmüş punto ve temsili ikonlar) */
         section[data-testid="stSidebar"] div.stButton > button {{
@@ -1331,23 +1331,30 @@ def _inject_css(aktif_sayfa: str = ""):
             font-size: 12px !important;
             min-height: 34px !important;
         }}
-        /* Tarih kutularındaki (stDateInput) sayı puntolarını küçült ve iç boşluğu daralt ki tam sığsın */
+        /* Tarih kutularındaki (stDateInput) sayı puntolarını küçült ve iç boşluğu sıfırla ki 2020 tam sığsın */
+        section[data-testid="stSidebar"] [data-testid="stDateInput"] > div,
         section[data-testid="stSidebar"] [data-testid="stDateInput"] div[data-baseweb="input"],
         section[data-testid="stSidebar"] [data-testid="stDateInput"] div[data-baseweb="base-input"] {{
-            padding: 0 2px !important;
-            min-height: 31px !important;
+            padding: 0 1px !important;
+            min-height: 30px !important;
         }}
         section[data-testid="stSidebar"] [data-testid="stDateInput"] input {{
-            font-size: 10.5px !important;
-            padding: 2px 1px !important;
-            letter-spacing: -0.03em !important;
+            font-size: 9.5px !important;
+            padding: 2px 0px !important;
+            letter-spacing: -0.04em !important;
             text-align: center !important;
             color: #1f2a44 !important;
             font-weight: 500 !important;
             width: 100% !important;
+            min-width: 0 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="column"],
+        section[data-testid="stSidebar"] [data-testid="stColumn"] {{
+            padding: 0 !important;
+            min-width: 0 !important;
         }}
         section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {{
-            gap: 5px !important;
+            gap: 4px !important;
         }}
         section[data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {{
             font-size: 12px !important;

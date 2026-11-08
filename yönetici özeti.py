@@ -2306,12 +2306,6 @@ def render_shared_sidebar(valid_all_df: pd.DataFrame, pages: list = None) -> dic
 def build_shared_context(raw_df: pd.DataFrame = None, pages: list = None, external_filters: dict = None) -> dict:
     """
     Tüm departmanların ortak kullanacağı veri, filtre ve metrik bağlamını (ctx) üretir.
-    Her departman bu ctx sözlüğünü alarak:
-    - ctx["sel_df"]   : Seçili dönem net satış DataFrame'i
-    - ctx["comp_df"]  : Karşılaştırma dönemi net satış DataFrame'i
-    - ctx["S"], ctx["C"] : Seçili ve karşılaştırma dönemi hazır özet metrikleri (rafradar-versiyon2.html S ve C yapısı)
-    - ctx["m"]        : Detaylı analitik metrikler
-    üzerinden kendi grafiklerini ve tablolarını doğrudan çizebilir.
     """
     inject_rafradar_v2_css()
 
@@ -2376,7 +2370,53 @@ def build_shared_context(raw_df: pd.DataFrame = None, pages: list = None, extern
     sel_lbl = fmt_range_tr(fa, fb)
     comp_lbl = fmt_range_tr(fca, fcb)
 
-    # Yeni müşteri sayısı (İlk alımını seçili dönemde yapanlar - Pazarlama KPI için)
+    # Karşılaştırma dönemi ham özetleri
+    comp_net_rev = float(comp_sales_df["TotalAmount"].sum()) if not comp_sales_df.empty else 0.0
+    comp_gross_rev = float(comp_sales_df["GrossAmount"].sum()) if not comp_sales_df.empty else 0.0
+    comp_profit = float(comp_sales_df["EstProfit"].sum()) if not comp_sales_df.empty else 0.0
+    comp_discount = ((comp_gross_rev - comp_net_rev) / comp_gross_rev * 100.0) if comp_gross_rev > 0 else 0.0
+    comp_customers = int(comp_sales_df["CustomerID"].nunique()) if not comp_sales_df.empty else 0
+    comp_invoices = int(comp_sales_df["InvoiceNo"].nunique()) if not comp_sales_df.empty else 0
+    comp_skus = int(comp_sales_df["Description"].nunique()) if not comp_sales_df.empty else 0
+    d_comp_rev = comp_net_rev / max(1, c_days)
+    d_comp_profit = comp_profit / max(1, c_days)
+    d_comp_cust = float(comp_sales_df.groupby("Date")["CustomerID"].nunique().mean()) if not comp_sales_df.empty else 0.0
+    d_comp_inv = comp_invoices / max(1, c_days)
+
+    # Ek departman anahtarlarını m sözlüğüne ekle
+    cust_df = m["cust_df"]
+    mid_cust_count = int((cust_df["Tier"] == "Gelişen Orta Bayiler").sum())
+    tail_cust_count = int((cust_df["Tier"] == "Küçük / Tekil Bayiler").sum())
+    vip_rev_sum = float(cust_df.loc[cust_df["Tier"] == "VIP & Lokomotif Bayiler", "Revenue"].sum())
+    mid_rev_sum = float(cust_df.loc[cust_df["Tier"] == "Gelişen Orta Bayiler", "Revenue"].sum())
+    tail_rev_sum = float(cust_df.loc[cust_df["Tier"] == "Küçük / Tekil Bayiler", "Revenue"].sum())
+    recency_threshold = min(90, max(14, int(s_days * 0.30)))
+
+    m.update(
+        {
+            "comp_net_rev": comp_net_rev,
+            "comp_gross_rev": comp_gross_rev,
+            "comp_profit": comp_profit,
+            "comp_discount": comp_discount,
+            "comp_customers": comp_customers,
+            "comp_invoices": comp_invoices,
+            "comp_skus": comp_skus,
+            "d_comp_rev": d_comp_rev,
+            "d_comp_profit": d_comp_profit,
+            "d_comp_cust": d_comp_cust,
+            "d_comp_inv": d_comp_inv,
+            "mid_cust_count": mid_cust_count,
+            "tail_cust_count": tail_cust_count,
+            "vip_rev_sum": vip_rev_sum,
+            "mid_rev_sum": mid_rev_sum,
+            "tail_rev_sum": tail_rev_sum,
+            "recency_threshold": recency_threshold,
+            "recoverable_vip_tl": m["vip_recovery_potential_tl"],
+            "stockout_risk_tl": m["stockout_prevention_tl"],
+            "top_city_name": m["top_city"],
+        }
+    )
+
     first_buy_dates = filtered_valid_all.groupby("CustomerID")["Date"].min()
     new_cust_count = int(((first_buy_dates >= fa) & (first_buy_dates <= fb)).sum())
 
@@ -2386,12 +2426,12 @@ def build_shared_context(raw_df: pd.DataFrame = None, pages: list = None, extern
     c_dq = c_qty / max(1, c_days)
 
     s_per_c = m["net_rev"] / max(1, m["active_customers"])
-    c_per_c = m["comp_net_rev"] / max(1, m["comp_customers"]) if m["comp_customers"] > 0 else 0.0
+    c_per_c = comp_net_rev / max(1, comp_customers) if comp_customers > 0 else 0.0
     s_dpc = m["d_net_rev"] / max(1e-6, m["d_cust"]) if m["d_cust"] > 0 else 0.0
-    c_dpc = m["d_comp_rev"] / max(1e-6, m["d_comp_cust"]) if m["d_comp_cust"] > 0 else 0.0
+    c_dpc = d_comp_rev / max(1e-6, d_comp_cust) if d_comp_cust > 0 else 0.0
 
     s_aov = m["net_rev"] / max(1, m["total_invoices"])
-    c_aov = m["comp_net_rev"] / max(1, m["comp_invoices"]) if m["comp_invoices"] > 0 else 0.0
+    c_aov = comp_net_rev / max(1, comp_invoices) if comp_invoices > 0 else 0.0
 
     def _rel(a, b):
         if b == 0 or pd.isna(b):
@@ -2421,18 +2461,18 @@ def build_shared_context(raw_df: pd.DataFrame = None, pages: list = None, extern
     }
     C_summary = {
         "days": c_days,
-        "net": m["comp_net_rev"],
-        "dnet": m["d_comp_rev"],
-        "profit": m["comp_profit"],
-        "dprofit": m["d_comp_profit"],
-        "disc": m["comp_discount"],
-        "cust": m["comp_customers"],
-        "dcust": m["d_comp_cust"],
-        "orders": m["comp_invoices"],
-        "dorders": m["d_comp_inv"],
+        "net": comp_net_rev,
+        "dnet": d_comp_rev,
+        "profit": comp_profit,
+        "dprofit": d_comp_profit,
+        "disc": comp_discount,
+        "cust": comp_customers,
+        "dcust": d_comp_cust,
+        "orders": comp_invoices,
+        "dorders": d_comp_inv,
         "qty": c_qty,
         "dqty": c_dq,
-        "sku": m["comp_skus"],
+        "sku": comp_skus,
         "per_cust": c_per_c,
         "d_per_cust": c_dpc,
         "aov": c_aov,

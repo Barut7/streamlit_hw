@@ -3526,55 +3526,162 @@ def sayfa_tedarik():
     nprod = len(qadet)
     cnt = {k: int((abc == k).sum()) for k in "ABC"}
     a_pay = cnt["A"] / nprod * 100
-
-    # ---------- 1-2 ----------
-    p1, p2 = st.columns([1.2, 1])
-    with p1, st.container(border=True):
-        ui.bolum(1, "Adedin %80’ini hangi ürünler getiriyor?", "Ürünler satılan adede göre sıralandı")
-        w.vurgu(f"Ürünlerin %{ui.sayi(a_pay, 0)}’i ({ui.sayi(cnt['A'])} ürün) satılan adedin %80’ini oluşturuyor.")
-        x = np.arange(1, nprod + 1) / nprod * 100
-        ix = np.unique(np.linspace(0, nprod - 1, 300).astype(int))
-        bx = (cnt["A"] + cnt["B"]) / nprod * 100
-        fig = go.Figure()
-        for x0, x1, rn in ((0, a_pay, "#d6ece5"), (a_pay, bx, "#fdf0cf")):
-            fig.add_vrect(x0=x0, x1=x1, fillcolor=rn, line_width=0, layer="below")
-        fig.add_hline(y=80, line_dash="dot", line_color=ui.RENK["yesil"])
-        fig.add_scatter(x=np.r_[0, x[ix]], y=np.r_[0, kum.values[ix] * 100], mode="lines", line=dict(color="#1f2a44", width=2.5),
-                        hovertemplate="%{x:.1f}% ürün → %{y:.1f}% adet<extra></extra>")
-        fig.add_annotation(x=a_pay, y=80, text=f"A: ürünlerin %{ui.sayi(a_pay, 1)}’i", showarrow=False, xanchor="left", yanchor="top", xshift=6, yshift=-6)
-        fig.update_layout(height=300, showlegend=False, margin=dict(l=0, r=0, t=6, b=0), plot_bgcolor="white",
-                          xaxis=dict(title="ürünler, adedi en yüksekten düşüğe sıralı (%)", range=[0, 100]),
-                          yaxis=dict(title="birikimli adet payı (%)", range=[0, 102]))
-        ui.plot(fig)
-        st.markdown(f"<span class='pill g'>A · {ui.sayi(cnt['A'])} ürün · adetin %80’i</span><span class='pill y'>B · {ui.sayi(cnt['B'])} ürün · %15</span>"
-                    f"<span class='pill'>C · {ui.sayi(cnt['C'])} ürün · %5</span>", unsafe_allow_html=True)
-        cls = abc + xyz
-        ust = qadet.head(10)
-        katg = tum.dropna(subset=["Category"]).groupby("Description")["Category"].first()
-        sinif_renk = {"A": "background:#14775f;color:#fff", "B": "background:#bfe3d9;color:#14513f", "C": "background:#eceff4;color:#3a4357"}
-        satir = []
-        for i, (u, v) in enumerate(ust.items(), 1):
-            c = cls[u]
-            satir.append([str(i), f"<b>{u if len(u) < 46 else u[:46] + '…'}</b><div style='font-size:11px;color:#5b6475'>{katg.get(u, '')}</div>",
-                          f"<span style='display:inline-block;padding:2px 9px;border-radius:6px;font-size:12px;font-weight:700;{sinif_renk[c[0]]}'>{c}</span>",
-                          f"<b>{ui.sayi(v)}</b>", f"%{ui.sayi(kum[u] * 100, 1)}"])
-        st.markdown("<div style='font-weight:700;font-size:14px;margin:12px 0 4px'>En çok satan ürünler</div>" +
-                    w.tablo(["#", "Ürün", "Sınıf", "Adet", "Kümülatif"], satir, sag=(3, 4)), unsafe_allow_html=True)
+    b_pay = cnt["B"] / nprod * 100
+    c_pay = cnt["C"] / nprod * 100
+    bx = a_pay + b_pay
     cls = abc + xyz
+
+    # ---------- 1-2 (ABC Pareto & ABC-XYZ Matrisi — Adet Bazlı) ----------
+    p1, p2 = st.columns([1.45, 1])
+    with p1, st.container(border=True):
+        st.markdown(
+            f"<div style='font-size:12px;font-weight:700;color:#14513f;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:3px'>"
+            f"1 · ABC PARETO VE ÜRÜN SIRALAMASI</div>"
+            f"<div style='font-family:Poppins,sans-serif;font-size:18px;font-weight:700;color:#1f2a44;line-height:1.3;margin-bottom:10px'>"
+            f"Ürünlerin %{ui.sayi(a_pay, 0)}’i ({ui.sayi(cnt['A'])} SKU) satılan adedin %80’ini oluşturuyor.</div>",
+            unsafe_allow_html=True,
+        )
+        c_sol, c_sag = st.columns([1, 1.18])
+        with c_sol:
+            st.markdown(
+                f"<div style='display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:#3a4357;margin:2px 0 8px 0'>"
+                f"<span><span style='display:inline-block;width:10px;height:10px;border-radius:2px;background:#689f90;margin-right:5px;vertical-align:middle'></span>A · %{ui.sayi(a_pay, 0)} SKU · %80 adet</span>"
+                f"<span><span style='display:inline-block;width:10px;height:10px;border-radius:2px;background:#accbc2;margin-right:5px;vertical-align:middle'></span>B · %{ui.sayi(b_pay, 0)} SKU · %15</span>"
+                f"<span><span style='display:inline-block;width:10px;height:10px;border-radius:2px;background:#dfece7;margin-right:5px;vertical-align:middle'></span>C · %{ui.sayi(c_pay, 0)} SKU · %5</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            x = np.arange(1, nprod + 1) / nprod * 100
+            ix = np.unique(np.linspace(0, nprod - 1, 250).astype(int))
+            fig = go.Figure()
+            for x0, x1, rn in ((0, a_pay, "rgba(47,127,107,0.34)"), (a_pay, bx, "rgba(47,127,107,0.16)"), (bx, 100, "rgba(47,127,107,0.06)")):
+                fig.add_vrect(x0=x0, x1=x1, fillcolor=rn, line_width=0, layer="below")
+            fig.add_shape(type="line", x0=0, y0=80, x1=a_pay, y1=80, line=dict(color="#185a47", width=1, dash="dot"))
+            fig.add_shape(type="line", x0=a_pay, y0=0, x1=a_pay, y1=80, line=dict(color="#185a47", width=1, dash="dot"))
+            fig.add_shape(type="line", x0=0, y0=95, x1=bx, y1=95, line=dict(color="#2f7f6b", width=1, dash="dot"))
+            fig.add_shape(type="line", x0=bx, y0=0, x1=bx, y1=95, line=dict(color="#2f7f6b", width=1, dash="dot"))
+            fig.add_scatter(
+                x=np.r_[0, x[ix]],
+                y=np.r_[0, kum.values[ix] * 100],
+                mode="lines",
+                line=dict(color="#0f533f", width=2.6),
+                hovertemplate="SKU payı: %{x:.1f}% → Birikimli adet: %{y:.1f}%<extra></extra>",
+            )
+            m_pts_x = [max(0.2, a_pay * 0.15), max(0.5, a_pay * 0.35), max(1.0, a_pay * 0.65), a_pay, (a_pay + bx) / 2, bx, 50.0, 75.0, 100.0]
+            m_pts_y = [float(np.interp(px, np.r_[0, x], np.r_[0, kum.values * 100])) for px in m_pts_x]
+            fig.add_scatter(
+                x=m_pts_x,
+                y=m_pts_y,
+                mode="markers",
+                marker=dict(
+                    size=[5, 5, 5, 8, 5, 8, 5, 5, 5],
+                    color="#0f533f",
+                    line=dict(color="#ffffff", width=[0, 0, 0, 2, 0, 2, 0, 0, 0]),
+                ),
+                hoverinfo="skip",
+            )
+            fig.update_layout(
+                height=310,
+                showlegend=False,
+                margin=dict(l=4, r=4, t=4, b=4),
+                plot_bgcolor="white",
+                xaxis=dict(
+                    showticklabels=False,
+                    range=[0, 100],
+                    gridcolor="#e3ece8",
+                    zeroline=False,
+                ),
+                yaxis=dict(
+                    showticklabels=False,
+                    range=[0, 102],
+                    gridcolor="#e3ece8",
+                    zeroline=False,
+                ),
+            )
+            ui.plot(fig)
+            st.markdown(
+                "<div style='text-align:center;font-size:11.5px;color:#5b6475;margin-top:-4px'>"
+                "SKU payı (satış adedi büyükten küçüğe)</div>",
+                unsafe_allow_html=True,
+            )
+        with c_sag:
+            ust = qadet.head(9)
+            katg = tum.dropna(subset=["Category"]).groupby("Description")["Category"].first()
+            sinif_renk = {
+                "A": "background:#145a46;color:#ffffff",
+                "B": "background:#c5ddd6;color:#14513f",
+                "C": "background:#e5e9ed;color:#3a4357",
+            }
+            satir = []
+            for i, (u, v) in enumerate(ust.items(), 1):
+                c = cls[u]
+                ad_kisa = u if len(u) < 34 else u[:34] + "…"
+                adet_str = f"{ui.sayi(v / 1000, 1)} bin" if v >= 1000 else f"{ui.sayi(v)}"
+                satir.append([
+                    f"<span style='color:#5b6475'>{i}</span>",
+                    f"<div style='font-weight:600;color:#1f2a44;line-height:1.25'>{ad_kisa}</div>"
+                    f"<div style='font-size:10.5px;color:#5b6475'>{katg.get(u, '')}</div>",
+                    f"<span style='display:inline-block;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;{sinif_renk[c[0]]}'>{c}</span>",
+                    f"<span style='font-weight:700;color:#1f2a44'>{adet_str}</span>",
+                    f"<span style='color:#3a4357'>%{ui.sayi(kum[u] * 100, 1)}</span>",
+                ])
+            st.markdown(
+                "<div style='font-family:Poppins,sans-serif;font-weight:600;font-size:15px;color:#1f2a44;margin:0 0 4px 0'>"
+                "En çok adet satan ürünler</div>"
+                + w.tablo(["#", "ÜRÜN", "SINIF", "ADET", "KÜMÜLATİF"], satir, sag=(3, 4)),
+                unsafe_allow_html=True,
+            )
+
     toplam_q = qadet.sum()
     hucre = {k: (int((cls == k).sum()), float(qadet[cls == k].sum() / toplam_q * 100)) for k in an2.POLITIKA}
     with p2, st.container(border=True):
-        ui.bolum(2, "Hangi ürünün talebi düzensiz?", "Satış hacmi (A-B-C) ve aylık satışın oynaklığı (X-Y-Z)")
-        w.vurgu(f"A ürünlerinin {ui.sayi(hucre['AZ'][0])} tanesi düzensiz: adedin %{ui.sayi(hucre['AZ'][1], 0)}’i stok sürprizi riski taşıyor.")
+        st.markdown(
+            f"<div style='font-size:12px;font-weight:700;color:#14513f;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:3px'>"
+            f"2 · ABC–XYZ MATRİSİ</div>"
+            f"<div style='font-family:Poppins,sans-serif;font-size:18px;font-weight:700;color:#1f2a44;line-height:1.3;margin-bottom:10px'>"
+            f"AX ürünleri otomatik yenilenebilir; AZ olan {ui.sayi(hucre['AZ'][0])} SKU ise yakından izlenmeli.</div>",
+            unsafe_allow_html=True,
+        )
         mxu = max(v[1] for v in hucre.values()) or 1
-        g = "<div style='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px'>"
-        for k, (n, u) in hucre.items():
-            t = min(1, u / mxu)
-            g += (f"<div style='background:{w.mix('#e8f2ef', '#2f8a73', t ** 0.5)};color:{'#fff' if t > 0.45 else '#1f2a44'};border-radius:8px;padding:8px 10px;min-height:78px'>"
-                  f"<div style='font-size:12px;font-weight:700'>{k}</div><div style='font-size:11px'>{ui.sayi(n)} ürün</div><div style='font-size:11px'>adetin %{ui.sayi(u, 1)}’i</div>"
-                  f"<div style='font-size:11px;font-weight:600;margin-top:2px'>{an2.POLITIKA[k]}</div></div>")
-        st.markdown(g + "</div>", unsafe_allow_html=True)
-        st.caption("Düzenli: aylık satışın dalgalanması düşük. Dalgalı: orta. Düzensiz: çok yüksek (bir ay çok, bir ay hiç).")
+        satir_etiket = {
+            "A": ("A", "%80 adet"),
+            "B": ("B", "%15 adet"),
+            "C": ("C", "%5 adet"),
+        }
+        g = (
+            "<div style='display:grid;grid-template-columns:56px repeat(3,minmax(0,1fr));gap:6px;align-items:center'>"
+            "<div></div>"
+            "<div style='font-size:11.5px;color:#3a4357;padding:0 2px'><b style='color:#1f2a44'>X</b><br><span style='font-size:10.5px;color:#5b6475'>düzenli</span></div>"
+            "<div style='font-size:11.5px;color:#3a4357;padding:0 2px'><b style='color:#1f2a44'>Y</b><br><span style='font-size:10.5px;color:#5b6475'>dalgalı</span></div>"
+            "<div style='font-size:11.5px;color:#3a4357;padding:0 2px'><b style='color:#1f2a44'>Z</b><br><span style='font-size:10.5px;color:#5b6475'>düzensiz</span></div>"
+        )
+        for r_harf in ("A", "B", "C"):
+            r_bas, r_alt = satir_etiket[r_harf]
+            g += (
+                f"<div style='font-size:12px;line-height:1.25;padding-right:4px'>"
+                f"<b style='font-size:13.5px;color:#1f2a44'>{r_bas}</b><br>"
+                f"<span style='font-size:10.5px;color:#5b6475'>{r_alt}</span></div>"
+            )
+            for c_harf in ("X", "Y", "Z"):
+                k = r_harf + c_harf
+                n, u = hucre[k]
+                t = min(1.0, u / mxu)
+                bg = w.mix("#e6f0ec", "#145a46", t ** 0.55)
+                fg = "#ffffff" if t > 0.42 else "#1f2a44"
+                g += (
+                    f"<div style='background:{bg};color:{fg};border-radius:8px;padding:9px 10px;min-height:86px;display:flex;flex-direction:column;justify-content:space-between'>"
+                    f"<div><div style='font-size:13px;font-weight:700'>{k}</div>"
+                    f"<div style='font-size:11px;opacity:0.95'>{ui.sayi(n)} SKU</div>"
+                    f"<div style='font-size:11px;opacity:0.95'>adet %{ui.sayi(u, 1)}</div></div>"
+                    f"<div style='font-size:10.5px;font-weight:600;margin-top:4px'>{an2.POLITIKA[k]}</div></div>"
+                )
+        g += "</div>"
+        st.markdown(g, unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:11.5px;color:#5b6475;margin-top:10px'>"
+            "X: CV ≤ 0,5 · Y: 0,5 &lt; CV ≤ 1,0 · Z: CV &gt; 1,0 · Renk koyuluğu = adet payı</div>",
+            unsafe_allow_html=True,
+        )
 
     # ---------- 3. Talep tahmini ----------
     top12 = qadet.head(12).index.tolist()

@@ -1,4 +1,4 @@
-"""RafRadar gelişmiş RafBot (Veriye Sor) yüzen sohbet asistanı modülü."""
+"""B2B Karar Destek Sistemi — Ayraç AI (Veriye Sor) yüzen sohbet asistanı modülü."""
 from __future__ import annotations
 
 import re
@@ -285,11 +285,11 @@ def rafbot(bilgi: dict):
     sayfa = _sayfa_tespit(bilgi)
     ss = st.session_state
     ss.setdefault(
-        "rafbot_msgs",
+        "ayrac_ai_msgs",
         [
             {
                 "role": "assistant",
-                "text": "Merhaba! Ben <b>Ayraç AI</b> 🔖 — RafRadar'ın akıllı kitap &amp; kırtasiye karar asistanıyım. Bu sayfadaki veriler, müşteri kodları (örn. <code>S00172</code>), şehirler, kategoriler veya ürünler hakkında bana soru sorabilir ya da hazır başlıklara tıklayabilirsin.",
+                "text": "Merhaba! Ben <b>Ayraç AI</b> 🔖 — B2B Karar Destek Sistemi'nin akıllı iş zekâsı asistanıyım. Bu sayfadaki veriler, müşteri kodları (örn. <code>S00172</code>), şehirler, kategoriler veya ürünler hakkında bana soru sorabilir ya da hazır başlıklara tıklayabilirsin.",
             }
         ],
     )
@@ -392,14 +392,14 @@ def rafbot(bilgi: dict):
             for c_idx, soru_metni in enumerate(row_chips):
                 if cols[c_idx].button(soru_metni, key=f"rb_chip_{sayfa}_{r_idx}_{c_idx}", use_container_width=True):
                     yanit = _cevap_uret(soru_metni, bilgi, sayfa)
-                    ss["rafbot_msgs"].append({"role": "user", "text": soru_metni})
-                    ss["rafbot_msgs"].append({"role": "assistant", "text": yanit})
+                    ss["ayrac_ai_msgs"].append({"role": "user", "text": soru_metni})
+                    ss["ayrac_ai_msgs"].append({"role": "assistant", "text": yanit})
                     st.rerun()
 
         # Mesaj geçmişi
         gecmis_kutu = st.container(height=250, border=True)
         with gecmis_kutu:
-            for m_item in ss["rafbot_msgs"][-14:]:
+            for m_item in ss["ayrac_ai_msgs"][-14:]:
                 if m_item["role"] == "user":
                     st.markdown(f"<div class='rb-msg-user'>{m_item['text']}</div>", unsafe_allow_html=True)
                 else:
@@ -416,12 +416,12 @@ def rafbot(bilgi: dict):
             gonder = f2.form_submit_button("Sor", type="primary", use_container_width=True)
             if gonder and girilen.strip():
                 yanit = _cevap_uret(girilen.strip(), bilgi, sayfa)
-                ss["rafbot_msgs"].append({"role": "user", "text": girilen.strip()})
-                ss["rafbot_msgs"].append({"role": "assistant", "text": yanit})
+                ss["ayrac_ai_msgs"].append({"role": "user", "text": girilen.strip()})
+                ss["ayrac_ai_msgs"].append({"role": "assistant", "text": yanit})
                 st.rerun()
 
         alt1, alt2 = st.columns([2, 1])
         alt1.caption("İpucu: Müşteri kodu, il veya kitap adı da yazabilirsin.")
         if alt2.button("Temizle", key=f"rb_temizle_{sayfa}", use_container_width=True):
-            ss["rafbot_msgs"] = [ss["rafbot_msgs"][0]]
+            ss["ayrac_ai_msgs"] = [ss["ayrac_ai_msgs"][0]]
             st.rerun()

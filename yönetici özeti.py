@@ -1376,6 +1376,12 @@ def _inject_css(aktif_sayfa: str = ""):
             padding: 14px 16px !important;
             box-shadow: 0 1px 2px rgba(31, 42, 68, 0.02);
         }}
+        [data-testid="stPlotlyChart"] {{
+            background-color: #fceef1 !important;
+            border-radius: 10px !important;
+            padding: 4px !important;
+            overflow: hidden !important;
+        }}
         h1, h2, h3, .h {{
             font-family: 'Poppins', sans-serif !important;
             color: #1f2a44;
@@ -1819,12 +1825,15 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
 
 
 def plot(fig):
-    """Plotly grafiğini RafRadar temasıyla basar."""
+    """Plotly grafiğini açık toz pembe (#fceef1) arka plan ve kurumsal temayla basar."""
     fig.update_layout(
         font=dict(family="Inter, system-ui, sans-serif", color="#1f2a44", size=11),
-        paper_bgcolor="white",
+        paper_bgcolor="#fceef1",
+        plot_bgcolor="#fceef1",
         hoverlabel=dict(bgcolor="#1f2a44", font_color="white", font_family="Inter, sans-serif", font_size=12),
     )
+    fig.update_xaxes(gridcolor="#f3dce1")
+    fig.update_yaxes(gridcolor="#f3dce1")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 

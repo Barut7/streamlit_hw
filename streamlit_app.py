@@ -1,18 +1,2362 @@
-"""RafRadar - tek dosya. Önce veri yüklenir, sonra sayfalar açılır.
-Altta common/ klasörü (hesaplama ve ortak arayüz) ayrı kalır; sayfalar bu dosyadadır."""
+"""RafRadar — Tek Dosya Tam Sürüm (streamlit_app.py)
+Tüm veri işleme, analitik modeller, HTML birebir kenar çubuğu (sidebar),
+6 departman sayfası ve Ayraç AI (Veriye Sor) sohbet asistanı bu tek dosyada birleştirilmiştir."""
+from __future__ import annotations
+
+import datetime
+import io
+import math
+import re
+import types
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from common import analytics as an
-from common import analytics2 as an2
-from common import chat, data, ui
-from common import widgets as w
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics import roc_auc_score
 
 st.set_page_config(page_title="RafRadar", page_icon="📚", layout="wide")
 KOK = Path(__file__).resolve().parent
+
+
+# ======================================================================
+# 1. VERİ OKUMA, DOĞRULAMA VE ÖN İŞLEME (data)
+# ======================================================================
+_DATA_ZORUNLU = [
+    "InvoiceNo",
+    "CustomerID",
+    "InvoiceDate",
+    "Description",
+    "Category",
+    "City",
+    "Quantity",
+    "UnitPrice",
+    "NetPrice",
+]
+
+
+def _dosya_oku(dosya_adi: str, icerik: bytes) -> pd.DataFrame:
+    ad = dosya_adi.lower()
+    buf = io.BytesIO(icerik)
+    if ad.endswith(".parquet"):
+        return pd.read_parquet(buf)
+    if ad.endswith(".xlsx") or ad.endswith(".xls"):
+        return pd.read_excel(buf)
+    if ad.endswith(".csv"):
+        try:
+            return pd.read_csv(buf)
+        except UnicodeDecodeError:
+            buf.seek(0)
+            return pd.read_csv(buf, encoding="latin1", sep=None, engine="python")
+    raise ValueError(f"Desteklenmeyen dosya uzantısı: {dosya_adi}")
+
+
+@st.cache_data(show_spinner=False)
+def _data_hazirla(dosya_adi: str, icerik: bytes) -> tuple[pd.DataFrame | None, int, list[str], dict]:
+    """Dosyayı okur, zorunlu sütunları kontrol eder, temizler ve türetilmiş sütunları ekler."""
+    hatalar: list[str] = []
+    try:
+        ham = _dosya_oku(dosya_adi, icerik)
+    except Exception as exc:
+        return None, 0, [f"Dosya okunamadı ({dosya_adi}): {exc}"], {}
+
+    if ham is None or ham.empty:
+        return None, 0, ["Yüklenen dosya boş görünüyor."], {}
+
+    ham.columns = [str(c).strip() for c in ham.columns]
+    eksik = [c for c in _DATA_ZORUNLU if c not in ham.columns]
+    if eksik:
+        hatalar.append(f"Eksik zorunlu sütunlar: {', '.join(eksik)}. Lütfen 9 zorunlu sütunun tamamını içeren bir dosya yükleyin.")
+        return None, 0, hatalar, {}
+
+    ham_satir = len(ham)
+    ham_sutun = len(ham.columns)
+
+    kontrol_sutunlari = ["InvoiceNo", "CustomerID", "InvoiceDate", "Description", "Category", "City", "StockCode"]
+    bos: dict[str, int] = {}
+    for k in kontrol_sutunlari:
+        if k in ham.columns:
+            s = ham[k]
+            bos_say = int(s.isna().sum() + (s.astype(str).str.strip().isin(["", "nan", "None", "NULL"])).sum() - s.isna().sum())
+            bos[k] = max(0, bos_say)
+
+    bilimsel = 0
+    if "StockCode" in ham.columns:
+        sc_str = ham["StockCode"].dropna().astype(str).str.strip()
+        bilimsel = int(
+            (
+                sc_str.str.contains("E+", case=False, regex=False)
+                | sc_str.str.match(r"^97[89]\d{4,6}00000$")
+            ).sum()
+        )
+
+    tekrar = int(ham.duplicated().sum())
+
+    df = ham.copy()
+    df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"], errors="coerce")
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
+    df["UnitPrice"] = pd.to_numeric(df["UnitPrice"], errors="coerce")
+    df["NetPrice"] = pd.to_numeric(df["NetPrice"], errors="coerce")
+
+    if df["InvoiceDate"].isna().all():
+        return None, 0, ["InvoiceDate sütunundaki tarihler okunamadı. Tarih biçimini kontrol edin."], {}
+
+    gecerli = (
+        df["InvoiceDate"].notna()
+        & df["CustomerID"].notna()
+        & df["Description"].notna()
+        & (df["Quantity"] > 0)
+        & (df["UnitPrice"] > 0)
+        & (df["NetPrice"] > 0)
+        & (df["NetPrice"] <= df["UnitPrice"] * 1.0001)
+    )
+    df = df.loc[gecerli].copy()
+    if df.empty:
+        return None, 0, ["Temizlik sonrası geçerli satış satırı kalmadı (tüm miktar veya fiyatlar ≤ 0)."], {}
+
+    df["InvoiceNo"] = df["InvoiceNo"].astype(str).str.strip()
+    df["CustomerID"] = df["CustomerID"].astype(str).str.strip()
+    df["Description"] = df["Description"].astype(str).str.strip()
+    df["Category"] = df["Category"].where(df["Category"].notna(), None)
+    df["City"] = df["City"].fillna("Belirsiz").astype(str).str.strip()
+
+    df["gun"] = df["InvoiceDate"].dt.normalize()
+    df["dow"] = df["InvoiceDate"].dt.dayofweek
+    df["gross"] = df["Quantity"] * df["UnitPrice"]
+    df["net"] = df["Quantity"] * df["NetPrice"]
+    df["disc"] = np.where(df["gross"] > 0, np.clip(1.0 - df["net"] / df["gross"], -0.5, 0.999), 0.0)
+
+    temiz_satir = len(df)
+    atilan = ham_satir - temiz_satir
+
+    kalite = {
+        "ham_satir": ham_satir,
+        "temiz_satir": temiz_satir,
+        "atilan": atilan,
+        "ham_sutun": ham_sutun,
+        "yeni_sutun": 3,
+        "bos": bos,
+        "bilimsel": bilimsel,
+        "tekrar": tekrar,
+    }
+    return df, atilan, [], kalite
+
+
+def _data_ornek_dosyalar() -> list[Path]:
+    adaylar = (
+        sorted(KOK.glob("data/*.parquet"))
+        + sorted(KOK.glob("*.parquet"))
+        + sorted(KOK.glob("data/*.xlsx"))
+        + sorted(KOK.glob("*.xlsx"))
+    )
+    gorulen = set()
+    sonuc = []
+    for p in adaylar:
+        rp = p.resolve()
+        if rp not in gorulen:
+            gorulen.add(rp)
+            sonuc.append(p)
+    return sonuc
+
+
+def _data_veri() -> pd.DataFrame:
+    if "df" not in st.session_state:
+        ornekler = _data_ornek_dosyalar()
+        if ornekler:
+            f = ornekler[0]
+            df, atilan, hatalar, kalite = _data_hazirla(f.name, f.read_bytes())
+            if not hatalar and df is not None:
+                st.session_state["df"] = df
+                st.session_state["atilan"] = atilan
+                st.session_state["kalite"] = kalite
+                st.session_state["dosya_adi"] = f.name
+    if "df" not in st.session_state:
+        st.warning("Önce veri setini yükleyin.")
+        st.stop()
+    return st.session_state["df"]
+
+
+data = types.SimpleNamespace(
+    ZORUNLU=_DATA_ZORUNLU,
+    hazirla=_data_hazirla,
+    ornek_dosyalar=_data_ornek_dosyalar,
+    veri=_data_veri,
+)
+
+
+# ======================================================================
+# 2. TEMEL ANALİTİK MOTOR (an)
+# ======================================================================
+
+
+def araliga_kes(df: pd.DataFrame, a, b) -> pd.DataFrame:
+    if df.empty:
+        return df
+    ta, tb = pd.Timestamp(a), pd.Timestamp(b)
+    return df[(df["gun"] >= ta) & (df["gun"] <= tb)]
+
+
+def ozet(m: pd.DataFrame, a, b) -> dict:
+    ta, tb = pd.Timestamp(a), pd.Timestamp(b)
+    gun = max(1, int((tb - ta).days) + 1)
+    x = araliga_kes(m, ta, tb)
+    if x.empty:
+        return {
+            "gun": gun, "net": 0.0, "gross": 0.0, "q": 0.0, "ord": 0, "musteri": 0,
+            "disc": 0.0, "dnet": 0.0, "dq": 0.0, "dord": 0.0, "dcust": 0.0,
+            "b": 0.0, "basket": 0.0, "L": 0.0, "dd": 0.0, "dbq": 0.0, "dbt": 0.0,
+        }
+
+    net = float(x["net"].sum())
+    gross = float(x["gross"].sum())
+    q = float(x["Quantity"].sum())
+    ord_cnt = int(x["InvoiceNo"].nunique())
+    musteri = int(x["CustomerID"].nunique())
+    disc = float(1.0 - net / gross) if gross > 0 else 0.0
+
+    dnet = net / gun
+    dq = q / gun
+    dord = ord_cnt / gun
+
+    g = x.groupby("gun").agg(
+        net=("net", "sum"),
+        gross=("gross", "sum"),
+        q=("Quantity", "sum"),
+        o=("InvoiceNo", "nunique"),
+        c=("CustomerID", "nunique"),
+    )
+    dcust = float(g["c"].sum() / gun)
+    dd = float((1.0 - g["net"] / g["gross"].replace(0, np.nan)).dropna().mean()) if len(g) else disc
+    dbq = float((g["q"] / g["o"].replace(0, np.nan)).dropna().mean()) if len(g) else 0.0
+    dbt = float((g["net"] / g["o"].replace(0, np.nan)).dropna().mean()) if len(g) else 0.0
+
+    b_val = q / ord_cnt if ord_cnt > 0 else 0.0
+    basket = net / ord_cnt if ord_cnt > 0 else 0.0
+    L = gross / q if q > 0 else 0.0
+
+    return {
+        "gun": gun,
+        "net": net,
+        "gross": gross,
+        "q": q,
+        "ord": ord_cnt,
+        "musteri": musteri,
+        "disc": disc,
+        "dnet": dnet,
+        "dq": dq,
+        "dord": dord,
+        "dcust": dcust,
+        "b": b_val,
+        "basket": basket,
+        "L": L,
+        "dd": dd,
+        "dbq": dbq,
+        "dbt": dbt,
+    }
+
+
+def kopru(S: dict, C: dict) -> list[float]:
+    """Günlük ciro farkını (S['dnet'] - C['dnet']) 4 çarpımsal faktöre (LMDI) ayrıştırır."""
+    d1, d0 = float(S["dnet"]), float(C["dnet"])
+    if d1 <= 0 or d0 <= 0:
+        return [d1 - d0, 0.0, 0.0, 0.0]
+    if abs(d1 - d0) < 1e-6:
+        return [0.0, 0.0, 0.0, 0.0]
+
+    f0 = [max(1e-9, C["dord"]), max(1e-9, C["b"]), max(1e-9, C["L"]), max(1e-9, 1.0 - C["disc"])]
+    f1 = [max(1e-9, S["dord"]), max(1e-9, S["b"]), max(1e-9, S["L"]), max(1e-9, 1.0 - S["disc"])]
+    l_mean = (d1 - d0) / (np.log(d1) - np.log(d0))
+    return [float(l_mean * np.log(a / b)) for a, b in zip(f1, f0)]
+
+
+def urun_listesi(tum: pd.DataFrame, n: int = 50) -> list[str]:
+    if tum.empty:
+        return []
+    return tum.groupby("Description")["net"].sum().nlargest(n).index.tolist()
+
+
+def urun_referans(tum: pd.DataFrame, urun: str, s_gun: int, ca, cb) -> dict:
+    u_df = tum[tum["Description"] == urun]
+    if u_df.empty:
+        return {"q": 0.0, "n": 0.0, "g": 0.0, "cap": 0.45, "mx": 0.50, "fb": True}
+
+    cap = float(np.percentile(u_df["disc"], 95))
+    mx = float(u_df["disc"].max())
+
+    u_comp = araliga_kes(u_df, ca, cb)
+    c_gun = max(1, int((pd.Timestamp(cb) - pd.Timestamp(ca)).days) + 1)
+    if not u_comp.empty and u_comp["Quantity"].sum() > 0:
+        oran = s_gun / c_gun
+        return {
+            "q": float(u_comp["Quantity"].sum() * oran),
+            "n": float(u_comp["net"].sum() * oran),
+            "g": float(u_comp["gross"].sum() * oran),
+            "cap": cap,
+            "mx": mx,
+            "fb": False,
+        }
+
+    tot_gun = max(1, int((tum["gun"].max() - tum["gun"].min()).days) + 1)
+    oran = s_gun / tot_gun
+    return {
+        "q": float(u_df["Quantity"].sum() * oran),
+        "n": float(u_df["net"].sum() * oran),
+        "g": float(u_df["gross"].sum() * oran),
+        "cap": cap,
+        "mx": mx,
+        "fb": True,
+    }
+
+
+def hafta_kategori(mr: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if mr.empty:
+        return {"Ciro payı": pd.DataFrame(), "Sipariş adedi": pd.DataFrame()}
+    top6 = mr.dropna(subset=["Category"]).groupby("Category")["net"].sum().nlargest(6).index.tolist()
+    sub = mr[mr["Category"].isin(top6)]
+    piv_net = (
+        sub.pivot_table(index="Category", columns="dow", values="net", aggfunc="sum", fill_value=0.0)
+        .reindex(index=top6, columns=range(7), fill_value=0.0)
+    )
+    row_sums = piv_net.sum(axis=1).replace(0, 1.0)
+    ciro_payi = piv_net.div(row_sums, axis=0) * 100.0
+
+    piv_sip = (
+        sub.pivot_table(index="Category", columns="dow", values="InvoiceNo", aggfunc="nunique", fill_value=0)
+        .reindex(index=top6, columns=range(7), fill_value=0)
+    )
+    return {"Ciro payı": ciro_payi, "Sipariş adedi": piv_sip}
+
+
+def birlikte(df: pd.DataFrame, limit: int = 3) -> list[dict]:
+    """Aynı siparişte en sık birlikte alınan ürün çiftlerini döndürür."""
+    if df.empty:
+        return []
+    top_u = df.groupby("Description")["InvoiceNo"].nunique().nlargest(100)
+    if len(top_u) < 2:
+        return []
+    urunler = top_u.index.tolist()
+    sub = df[df["Description"].isin(urunler)][["InvoiceNo", "Description"]].drop_duplicates()
+
+    # İkili matris çarpımı ile hızlı ortak sipariş sayımı
+    cat_u = pd.Categorical(sub["Description"], categories=urunler, ordered=True)
+    cat_inv = pd.Categorical(sub["InvoiceNo"])
+    n_inv = len(cat_inv.categories)
+    n_u = len(urunler)
+    if n_inv == 0 or n_u < 2:
+        return []
+
+    mat = np.zeros((n_inv, n_u), dtype=np.int16)
+    mat[cat_inv.codes, cat_u.codes] = 1
+    co = mat.T.astype(np.int32) @ mat.astype(np.int32)
+    diag = np.diag(co).copy()
+    np.fill_diagonal(co, 0)
+
+    ciftler = []
+    for i in range(n_u):
+        for j in range(i + 1, n_u):
+            n_co = int(co[i, j])
+            if n_co >= 3:
+                payda = max(1, min(int(diag[i]), int(diag[j])))
+                ciftler.append({
+                    "a": urunler[i],
+                    "b": urunler[j],
+                    "n": n_co,
+                    "oran": float(n_co / payda),
+                })
+    ciftler.sort(key=lambda x: (-x["n"], -x["oran"]))
+    return ciftler[:limit]
+
+
+def en_cok_satanlar(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    top_q = df.groupby("Description")["Quantity"].sum().nlargest(n)
+    satirlar = []
+    for sira, (u, adet) in enumerate(top_q.items(), 1):
+        invs = set(df.loc[df["Description"] == u, "InvoiceNo"].unique())
+        n_inv = max(1, len(invs))
+        diger = df[(df["InvoiceNo"].isin(invs)) & (df["Description"] != u)]
+        if not diger.empty:
+            es_top = diger.groupby("Description")["InvoiceNo"].nunique().nlargest(1)
+            es_urun = str(es_top.index[0])
+            oran = float(es_top.iloc[0] / n_inv)
+        else:
+            es_urun = "—"
+            oran = 0.0
+        satirlar.append({
+            "#": sira,
+            "Best seller": u,
+            "Adet": float(adet),
+            "Birlikte en çok alınan": es_urun,
+            "Birlikte alma oranı": oran,
+        })
+    return pd.DataFrame(satirlar)
+
+
+def pareto(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["net", "kum", "seg"])
+    s = df.groupby(col)["net"].sum().sort_values(ascending=False)
+    toplam = max(1e-9, float(s.sum()))
+    kum = s.cumsum() / toplam
+    onceki = kum.shift(1, fill_value=0.0)
+    seg = np.where(onceki < 0.80, "A", np.where(onceki < 0.95, "B", "C"))
+    return pd.DataFrame({"net": s, "kum": kum, "seg": seg}, index=s.index)
+
+
+def musteri_ozeti(tum: pd.DataFrame, mr: pd.DataFrame, pc: pd.DataFrame, max_gun: pd.Timestamp) -> pd.DataFrame:
+    if pc.empty:
+        return pd.DataFrame(columns=["seg", "net", "kum", "il", "siparis", "son", "pasif"])
+    out = pc.copy()
+    g_mr = mr.groupby("CustomerID").agg(siparis=("InvoiceNo", "nunique"))
+    son_tum = tum.groupby("CustomerID")["gun"].max()
+    il_tum = tum.groupby("CustomerID")["City"].first()
+
+    out["il"] = il_tum.reindex(out.index).fillna("")
+    out["siparis"] = g_mr["siparis"].reindex(out.index).fillna(0).astype(int)
+    out["son"] = son_tum.reindex(out.index)
+    out["pasif"] = (pd.Timestamp(max_gun) - out["son"]).dt.days
+    return out
+
+
+def _musteri_ozellikleri(df_gecmis: pd.DataFrame, ref_gun: pd.Timestamp) -> pd.DataFrame:
+    g = df_gecmis.groupby("CustomerID").agg(
+        ilk=("gun", "min"),
+        son=("gun", "max"),
+        sip=("InvoiceNo", "nunique"),
+        gun_say=("gun", "nunique"),
+        net=("net", "sum"),
+        adet=("Quantity", "sum"),
+        kat=("Category", "nunique"),
+    )
+    g["rec"] = (ref_gun - g["son"]).dt.days.astype(float)
+    g["span"] = np.maximum(1.0, (g["son"] - g["ilk"]).dt.days.astype(float))
+    g["aralik"] = np.where(g["gun_say"] > 1, g["span"] / (g["gun_say"] - 1), 90.0)
+    g["gecikme_orani"] = g["rec"] / np.maximum(7.0, g["aralik"])
+    g["sepet"] = g["net"] / np.maximum(1.0, g["sip"])
+
+    son30 = df_gecmis[df_gecmis["gun"] > (ref_gun - pd.Timedelta(days=30))].groupby("CustomerID")["net"].sum()
+    son90 = df_gecmis[df_gecmis["gun"] > (ref_gun - pd.Timedelta(days=90))].groupby("CustomerID")["net"].sum()
+    g["net30"] = son30.reindex(g.index).fillna(0.0)
+    g["net90"] = son90.reindex(g.index).fillna(0.0)
+    return g
+
+
+def churn_modeli(df: pd.DataFrame) -> tuple[pd.DataFrame, float | None]:
+    """Gradient Boosting ile 30 günlük sipariş vermeme (churn) olasılığını ve beklenen 30 günlük ciroyu hesaplar."""
+    max_gun = df["gun"].max()
+    min_gun = df["gun"].min()
+    oz_son = _musteri_ozellikleri(df, max_gun)
+    cols = ["rec", "sip", "gun_say", "net", "adet", "kat", "aralik", "gecikme_orani", "sepet", "net30", "net90"]
+
+    auc = None
+    model = None
+    if (max_gun - min_gun).days >= 90:
+        t_kes = max_gun - pd.Timedelta(days=30)
+        t_val = max_gun - pd.Timedelta(days=60)
+        df_egit = df[df["gun"] <= t_val]
+        df_hedef_egit = df[(df["gun"] > t_val) & (df["gun"] <= t_kes)]
+        df_test = df[df["gun"] <= t_kes]
+        df_hedef_test = df[df["gun"] > t_kes]
+
+        if not df_egit.empty and not df_test.empty:
+            x_tr = _musteri_ozellikleri(df_egit, t_val)
+            aktif_tr = set(df_hedef_egit["CustomerID"].unique())
+            y_tr = (~x_tr.index.isin(aktif_tr)).astype(int)
+
+            x_te = _musteri_ozellikleri(df_test, t_kes)
+            aktif_te = set(df_hedef_test["CustomerID"].unique())
+            y_te = (~x_te.index.isin(aktif_te)).astype(int)
+
+            if len(np.unique(y_tr)) == 2 and len(np.unique(y_te)) == 2:
+                clf = GradientBoostingClassifier(n_estimators=80, max_depth=3, learning_rate=0.07, random_state=42)
+                clf.fit(x_tr[cols], y_tr)
+                p_te = clf.predict_proba(x_te[cols])[:, 1]
+                auc = float(roc_auc_score(y_te, p_te))
+                # Tüm etiketli geçmişle (t_kes) yeniden eğit
+                clf.fit(x_te[cols], y_te)
+                model = clf
+
+    if model is not None:
+        p = model.predict_proba(oz_son[cols])[:, 1]
+    else:
+        # Yedek analitik lojistik skor
+        z = (oz_son["rec"] - 35.0) / 25.0 + 0.4 * np.clip(oz_son["gecikme_orani"] - 1.0, -2.0, 4.0) - 0.15 * np.log1p(oz_son["sip"])
+        p = 1.0 / (1.0 + np.exp(-z))
+
+    risk = pd.Series(np.where(p >= 0.70, "Yüksek", np.where(p >= 0.40, "Orta", "Düşük")), index=oz_son.index)
+    toplam_gun = max(30.0, float((max_gun - min_gun).days + 1))
+    m30 = np.maximum(oz_son["net90"] / 3.0, oz_son["net"] * (30.0 / toplam_gun))
+
+    out = pd.DataFrame({"p": p, "risk": risk, "m30": m30}, index=oz_son.index)
+    return out, auc
+
+
+def supheli(tum: pd.DataFrame, mr: pd.DataFrame, tur: str = "indirim") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Kategori medyanından sapan şüpheli sipariş-kategori satırlarını döndürür."""
+    if mr.empty:
+        bos = pd.DataFrame(columns=["InvoiceNo", "Category", "musteri", "q", "g", "n", "indirim", "md", "sapma", "fazla", "mq", "qr"])
+        return bos, bos
+
+    baz_df = tum.dropna(subset=["Category"])
+    baz_oc = baz_df.groupby(["InvoiceNo", "Category"], as_index=False).agg(
+        q=("Quantity", "sum"),
+        g=("gross", "sum"),
+        n=("net", "sum"),
+    )
+    baz_oc["indirim"] = np.where(baz_oc["g"] > 0, 1.0 - baz_oc["n"] / baz_oc["g"], 0.0)
+    kat_med = baz_oc.groupby("Category").agg(md=("indirim", "median"), mq=("q", "median"))
+
+    oc = mr.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
+        musteri=("CustomerID", "first"),
+        q=("Quantity", "sum"),
+        g=("gross", "sum"),
+        n=("net", "sum"),
+    )
+    oc["indirim"] = np.where(oc["g"] > 0, 1.0 - oc["n"] / oc["g"], 0.0)
+    oc = oc.merge(kat_med, on="Category", how="left")
+    oc["md"] = oc["md"].fillna(0.38)
+    oc["mq"] = oc["mq"].fillna(10.0).replace(0, 1.0)
+    oc["sapma"] = oc["indirim"] - oc["md"]
+    oc["fazla"] = np.where(oc["sapma"] > 0, oc["sapma"] * oc["g"], 0.0)
+    oc["qr"] = oc["q"] / oc["mq"]
+
+    if tur == "indirim":
+        sec = oc[oc["sapma"] > 0.10].sort_values("fazla", ascending=False).copy()
+    else:
+        sec = oc[oc["qr"] >= 5.0].sort_values("qr", ascending=False).copy()
+    return sec, oc
+
+an = types.SimpleNamespace(
+    araliga_kes=araliga_kes,
+    ozet=ozet,
+    kopru=kopru,
+    urun_listesi=urun_listesi,
+    urun_referans=urun_referans,
+    hafta_kategori=hafta_kategori,
+    birlikte=birlikte,
+    en_cok_satanlar=en_cok_satanlar,
+    pareto=pareto,
+    musteri_ozeti=musteri_ozeti,
+    churn_modeli=churn_modeli,
+    supheli=supheli,
+)
+
+
+# ======================================================================
+# 3. İLERİ ANALİTİK, RFM, KOHORT VE TEDARİK MOTORU (an2)
+# ======================================================================
+
+
+def _m_avg4(wk: np.ndarray, h: int = 8) -> list[float]:
+    v = float(np.mean(wk[-4:])) if len(wk) else 0.0
+    return [max(0.0, v)] * h
+
+
+def _m_avg8(wk: np.ndarray, h: int = 8) -> list[float]:
+    v = float(np.mean(wk[-8:])) if len(wk) else 0.0
+    return [max(0.0, v)] * h
+
+
+def _m_holt(wk: np.ndarray, h: int = 8) -> list[float]:
+    if len(wk) == 0:
+        return [0.0] * h
+    if len(wk) == 1:
+        return [max(0.0, float(wk[0]))] * h
+    alpha, beta, phi = 0.35, 0.15, 0.85
+    lvl = float(wk[0])
+    trd = float(wk[1] - wk[0])
+    for y in wk[1:]:
+        prev_lvl = lvl
+        lvl = alpha * float(y) + (1.0 - alpha) * (lvl + phi * trd)
+        trd = beta * (lvl - prev_lvl) + (1.0 - beta) * phi * trd
+    out = []
+    phi_sum = 0.0
+    for k in range(1, h + 1):
+        phi_sum += phi ** k
+        out.append(max(0.0, lvl + phi_sum * trd))
+    return out
+
+
+MODELLER = [
+    ("Son 4 hafta ortalaması", _m_avg4),
+    ("Son 8 hafta ortalaması", _m_avg8),
+    ("Trend (Holt)", _m_holt),
+]
+
+POLITIKA = {
+    "AX": "Düzenli otomatik sipariş",
+    "AY": "Tahmin + güvenlik stoğu",
+    "AZ": "Sık kontrol + yüksek güvenlik stoğu",
+    "BX": "Sabit aralıkla sipariş",
+    "BY": "Tahmin + orta güvenlik stoğu",
+    "BZ": "Siparişe göre tedarik",
+    "CX": "Toplu al, az uğraş",
+    "CY": "Az stok tut",
+    "CZ": "Stok tutma / katalogdan çıkar",
+}
+
+SEG_AD = [
+    "Şampiyonlar",
+    "Sadık",
+    "Yeni / Potansiyel",
+    "Dikkat gerektiren",
+    "Risk altında",
+    "Uykuda / Kayıp",
+    "Dönemde sipariş vermeyen",
+]
+
+SEG_ACIKLAMA = [
+    "Yakın zamanda, sık ve yüksek tutarlı sipariş veren en değerli müşteriler.",
+    "Düzenli sipariş veren ve ciro katkısı yüksek müşteriler.",
+    "Yakın zamanda sipariş vermiş ancak sipariş sıklığı/tutarı henüz düşük müşteriler.",
+    "Orta sıklık ve tutarda sipariş veren, hatırlatma ile sadık gruba taşınabilecek müşteriler.",
+    "Geçmişte sık ve yüksek tutarlı alım yapıp son dönemde sipariş vermeyi geciktiren kritik müşteriler.",
+    "Uzun süredir sipariş vermeyen ve alım sıklığı düşük müşteriler.",
+    "Seçili tarih aralığında hiç sipariş vermemiş ancak daha önce alımı bulunan müşteriler.",
+]
+
+SEG_RENK = ["#14513f", "#3d9a84", "#8cc5b5", "#e0a526", "#d9622b", "#d0574f", "#cfc9bd"]
+SEG_YAZI = ["#fff", "#fff", "#1f2a44", "#1f2a44", "#fff", "#fff", "#1f2a44"]
+
+
+def seg_of(R: int, FM: int) -> int:
+    """R (1..5, 5=en yeni) ve FM (1..5, 5=en yüksek) puanını 0..5 RFM segment indeksine çevirir."""
+    if FM >= 4 and R >= 4 and (FM == 5 or R == 5):
+        return 0  # Şampiyonlar
+    if FM >= 3 and R >= 4:
+        return 1  # Sadık
+    if FM >= 4 and R == 3:
+        return 1  # Sadık
+    if FM <= 2 and R >= 4:
+        return 2  # Yeni / Potansiyel
+    if R == 3 and FM <= 3:
+        return 3  # Dikkat gerektiren
+    if FM >= 3 and R <= 2:
+        return 4  # Risk altında
+    return 5  # Uykuda / Kayıp
+
+
+def baz_tahmin30(m: pd.DataFrame) -> tuple[float, float]:
+    """Önümüzdeki 30 gün için baz ciro tahmini ve geriye dönük test WAPE hatasını döndürür."""
+    if m.empty:
+        return 0.0, 0.25
+    min_g, max_g = m["gun"].min(), m["gun"].max()
+    gunluk = m.groupby("gun")["net"].sum().reindex(pd.date_range(min_g, max_g), fill_value=0.0).values
+    n_haf = len(gunluk) // 7
+    if n_haf < 8:
+        ort_gun = float(np.mean(gunluk)) if len(gunluk) else 0.0
+        return ort_gun * 30.0, 0.25
+
+    wk = gunluk[: n_haf * 7].reshape(-1, 7).sum(axis=1)
+    sonuc, en = geri_test(wk)
+    best = sonuc[en]
+    f5 = best["f"](wk, 5)
+    baz = float(sum(f5[:4]) + f5[4] * (2.0 / 7.0))
+    wape = float(np.clip(best["wape"], 0.08, 0.45))
+    return baz, wape
+
+
+def norm_asimi(tum: pd.DataFrame, m: pd.DataFrame | None = None) -> tuple[dict, pd.DataFrame]:
+    """Kategori medyan indirimini 10+ puan aşan siparişleri ve kategori kırılımını hesaplar."""
+    hedef = m if m is not None else tum
+    if hedef.empty:
+        bos = pd.DataFrame(columns=["md", "asan", "pay", "fazla"])
+        return {"asan_siparis": 0, "toplam": 1, "fazla": 0.0, "tavan": 0.0}, bos
+
+    baz_oc = tum.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
+        g=("gross", "sum"),
+        n=("net", "sum"),
+    )
+    baz_oc["disc"] = np.where(baz_oc["g"] > 0, 1.0 - baz_oc["n"] / baz_oc["g"], 0.0)
+    kat_md = baz_oc.groupby("Category")["disc"].median()
+
+    oc = hedef.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
+        g=("gross", "sum"),
+        n=("net", "sum"),
+    )
+    oc["disc"] = np.where(oc["g"] > 0, 1.0 - oc["n"] / oc["g"], 0.0)
+    oc["md"] = oc["Category"].map(kat_md).fillna(0.38)
+    oc["sapma"] = oc["disc"] - oc["md"]
+    oc["asan"] = oc["sapma"] > 0.10
+    oc["fazla"] = np.where(oc["asan"], oc["sapma"] * oc["g"], 0.0)
+    oc["tavan"] = np.where(oc["sapma"] > 0.05, (oc["sapma"] - 0.05) * oc["g"], 0.0)
+
+    kat_ozet = oc.groupby("Category").agg(
+        md=("md", "first"),
+        asan=("asan", "sum"),
+        toplam=("InvoiceNo", "count"),
+        fazla=("fazla", "sum"),
+    )
+    kat_ozet["pay"] = kat_ozet["asan"] / np.maximum(1, kat_ozet["toplam"])
+    kat_ozet = kat_ozet.sort_values("pay", ascending=False)
+
+    sip_bazli = oc.groupby("InvoiceNo").agg(asan=("asan", "any"), fazla=("fazla", "sum"), tavan=("tavan", "sum"))
+    top = {
+        "asan_siparis": int(sip_bazli["asan"].sum()),
+        "toplam": max(1, int(len(sip_bazli))),
+        "fazla": float(oc["fazla"].sum()),
+        "tavan": float(oc["tavan"].sum()),
+    }
+    return top, kat_ozet
+
+
+def abc_xyz(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """Ürünleri satılan adede göre ABC ve aylık talep oynaklığına (CV) göre XYZ olarak sınıflandırır."""
+    if df.empty:
+        bos = pd.Series(dtype=float)
+        return bos, bos, pd.Series(dtype=str), pd.Series(dtype=str)
+
+    qadet = df.groupby("Description")["Quantity"].sum().sort_values(ascending=False)
+    toplam = max(1e-9, float(qadet.sum()))
+    kum = qadet.cumsum() / toplam
+    onceki = kum.shift(1, fill_value=0.0)
+    abc = pd.Series(np.where(onceki < 0.80, "A", np.where(onceki < 0.95, "B", "C")), index=qadet.index)
+
+    ay_mat = (
+        df.assign(ay=df["gun"].dt.month)
+        .pivot_table(index="Description", columns="ay", values="Quantity", aggfunc="sum", fill_value=0.0)
+        .reindex(index=qadet.index, columns=range(1, 13), fill_value=0.0)
+    )
+    ort = ay_mat.mean(axis=1).replace(0, np.nan)
+    std = ay_mat.std(axis=1, ddof=0)
+    cv = (std / ort).fillna(2.0)
+    xyz = pd.Series(np.where(cv <= 0.50, "X", np.where(cv <= 1.00, "Y", "Z")), index=qadet.index)
+    return qadet, kum, abc, xyz
+
+
+def yavas_urunler(m: pd.DataFrame, bitis: str) -> pd.DataFrame:
+    """Bitiş tarihinden önceki 90 günde satışı bir önceki 90 güne göre %70 ve üzeri düşen ürünleri döndürür."""
+    if m.empty:
+        return pd.DataFrame(columns=["q90", "pr", "d"])
+    tb = pd.Timestamp(bitis)
+    t1 = tb - pd.Timedelta(days=89)
+    t0 = t1 - pd.Timedelta(days=90)
+
+    son90 = m[(m["gun"] >= t1) & (m["gun"] <= tb)].groupby("Description")["Quantity"].sum()
+    onc90 = m[(m["gun"] >= t0) & (m["gun"] < t1)].groupby("Description")["Quantity"].sum()
+    u_ozet = m.groupby("Description").agg(gross=("gross", "sum"), net=("net", "sum"), q=("Quantity", "sum"))
+
+    df_y = pd.DataFrame({"q_onc": onc90, "q_son": son90}).fillna(0.0)
+    df_y = df_y[(df_y["q_onc"] >= 20) & (df_y["q_son"] <= df_y["q_onc"] * 0.30)].copy()
+    if df_y.empty:
+        return pd.DataFrame(columns=["q90", "pr", "d"])
+
+    u_sub = u_ozet.reindex(df_y.index)
+    df_y["q90"] = np.maximum(df_y["q_son"], df_y["q_onc"] * 0.15)
+    df_y["pr"] = (u_sub["gross"] / np.maximum(1.0, u_sub["q"])).fillna(35.0)
+    df_y["d"] = np.clip(1.0 - u_sub["net"] / np.maximum(1.0, u_sub["gross"]), 0.05, 0.75).fillna(0.38)
+    return df_y[["q90", "pr", "d"]]
+
+
+def musteri_degisim(tum: pd.DataFrame, m: pd.DataFrame, a, b, ca, cb) -> dict:
+    """Seçili dönem ve karşılaştırma dönemi arasındaki aktif, yeni, geri dönen ve kaybedilen müşterileri hesaplar."""
+    s_df = an.araliga_kes(m, a, b)
+    c_df = an.araliga_kes(m, ca, cb)
+    ilk_tum = tum.groupby("CustomerID")["gun"].min()
+
+    set_s = set(s_df["CustomerID"].unique())
+    set_c = set(c_df["CustomerID"].unique())
+
+    ct = len(set_s & set_c)
+    ls = len(set_c - set_s)
+    gelenler = set_s - set_c
+
+    ta = pd.Timestamp(a)
+    tca = pd.Timestamp(ca)
+    nw = sum(1 for cid in gelenler if ilk_tum.get(cid, ta) >= ta)
+    bk = len(gelenler) - nw
+    nwC = sum(1 for cid in set_c if ilk_tum.get(cid, tca) >= tca)
+
+    return {
+        "aS": len(set_s),
+        "aC": len(set_c),
+        "nw": nw,
+        "nwC": max(1, nwC) if len(set_c) and nwC == 0 else nwC,
+        "bk": bk,
+        "ls": ls,
+        "ct": ct,
+    }
+
+
+def aylik(m: pd.DataFrame, yil: int) -> pd.DataFrame | None:
+    d = m[m["gun"].dt.year == int(yil)]
+    if d.empty:
+        return None
+    g = d.groupby(d["gun"].dt.month).agg(net=("net", "sum"), gross=("gross", "sum")).reindex(range(1, 13), fill_value=0.0)
+    g["disc"] = np.where(g["gross"] > 0, 1.0 - g["net"] / g["gross"], 0.0)
+    return g
+
+
+def kohort_ceyrek(m: pd.DataFrame) -> tuple[list, dict]:
+    """Çeyreklik müşteri kohort elde tutma (retention) tablosunu ve ortalamalarını hesaplar."""
+    if m.empty:
+        return [], {1: None, 2: None, 3: None}
+
+    yil = int(m["gun"].dt.year.mode().iloc[0])
+    d = m[m["gun"].dt.year == yil]
+    if d.empty:
+        return [], {1: None, 2: None, 3: None}
+
+    d_q = d.assign(q=d["gun"].dt.quarter)
+    mevcut_q = sorted(d_q["q"].unique().tolist())
+    max_q = max(mevcut_q)
+    ilk_q = d_q.groupby("CustomerID")["q"].min()
+    aktif_q = d_q.groupby(["CustomerID", "q"]).size().unstack(fill_value=0) > 0
+
+    ks = []
+    top_pay = {1: 0, 2: 0, 3: 0}
+    top_payda = {1: 0, 2: 0, 3: 0}
+
+    for q0 in range(1, 5):
+        cids = ilk_q[ilk_q == q0].index
+        n = len(cids)
+        if n == 0:
+            continue
+        yuz = []
+        for k in (1, 2, 3):
+            qk = q0 + k
+            if qk <= max_q and qk in aktif_q.columns:
+                tutulan = int(aktif_q.loc[cids, qk].sum())
+                yuz.append(float(tutulan / n * 100.0))
+                top_pay[k] += tutulan
+                top_payda[k] += n
+            else:
+                yuz.append(None)
+        ks.append((f"{yil} Ç{q0}", n, yuz))
+
+    kg = {k: (float(top_pay[k] / top_payda[k] * 100.0) if top_payda[k] > 0 else None) for k in (1, 2, 3)}
+    return ks, kg
+
+
+def rfm(tum: pd.DataFrame, m: pd.DataFrame, a, b) -> tuple[pd.DataFrame, pd.Index]:
+    """Seçili dönemde sipariş veren müşteriler için RFM puanlarını ve segmentlerini hesaplar."""
+    mr = an.araliga_kes(m, a, b)
+    ta, tb = pd.Timestamp(a), pd.Timestamp(b)
+    onceden_all = m[m["gun"] < ta]["CustomerID"].unique()
+
+    if mr.empty:
+        bos = pd.DataFrame(columns=["son", "sip", "net", "rec", "R", "FM", "seg"])
+        return bos, pd.Index(onceden_all)
+
+    g = mr.groupby("CustomerID").agg(
+        son=("gun", "max"),
+        sip=("InvoiceNo", "nunique"),
+        net=("net", "sum"),
+    )
+    g["rec"] = (tb - g["son"]).dt.days.astype(int)
+
+    n = len(g)
+    if n >= 5:
+        r_score = pd.qcut(g["rec"].rank(method="first", ascending=False), 5, labels=[1, 2, 3, 4, 5]).astype(int)
+        f_score = pd.qcut(g["sip"].rank(method="first", ascending=True), 5, labels=[1, 2, 3, 4, 5]).astype(int)
+        m_score = pd.qcut(g["net"].rank(method="first", ascending=True), 5, labels=[1, 2, 3, 4, 5]).astype(int)
+    else:
+        r_score = pd.Series(3, index=g.index)
+        f_score = pd.Series(3, index=g.index)
+        m_score = pd.Series(3, index=g.index)
+
+    fm_score = np.clip(np.round((f_score + m_score) / 2.0), 1, 5).astype(int)
+    g["R"] = r_score
+    g["FM"] = fm_score
+    g["seg"] = [seg_of(int(r), int(fm)) for r, fm in zip(g["R"], g["FM"])]
+
+    onceden = pd.Index([c for c in onceden_all if c not in g.index])
+    return g, onceden
+
+
+def gecikme(tum: pd.DataFrame, rf: pd.DataFrame, b) -> pd.Series:
+    """Her müşterinin kendi tipik sipariş aralığına göre gecikme durumunu (0..3) hesaplar."""
+    tb = pd.Timestamp(b)
+    gecmis = tum[tum["gun"] <= tb]
+    if gecmis.empty:
+        return pd.Series(dtype=int)
+
+    gun_list = gecmis[["CustomerID", "gun"]].drop_duplicates().sort_values(["CustomerID", "gun"])
+    gun_list["fark"] = gun_list.groupby("CustomerID")["gun"].diff().dt.days
+
+    ozet = gun_list.groupby("CustomerID").agg(
+        gun_say=("gun", "count"),
+        son=("gun", "max"),
+        tipik=("fark", "median"),
+    )
+    ozet["rec"] = (tb - ozet["son"]).dt.days
+    oran = ozet["rec"] / np.maximum(1.0, ozet["tipik"].fillna(999.0))
+
+    durum = np.where(
+        ozet["gun_say"] < 3,
+        3,
+        np.where(oran <= 1.0, 0, np.where(oran <= 2.0, 1, 2)),
+    )
+    return pd.Series(durum, index=ozet.index, dtype=int)
+
+
+def il_dagilimi(tum: pd.DataFrame, mr: pd.DataFrame) -> pd.DataFrame:
+    if mr.empty:
+        return pd.DataFrame(columns=["net", "musteri", "siparis"])
+    g = mr.groupby("City").agg(
+        net=("net", "sum"),
+        musteri=("CustomerID", "nunique"),
+        siparis=("InvoiceNo", "nunique"),
+    )
+    return g.sort_values("net", ascending=False)
+
+
+def kategori_endeksi(mr: pd.DataFrame, rf: pd.DataFrame) -> tuple[list[str], list[list[int]]]:
+    """RFM segmentlerinin en büyük 6 kategoriyi alım eğilim endeksini (100 = ortalama) hesaplar."""
+    if mr.empty or rf.empty:
+        return [], []
+    df_k = mr.dropna(subset=["Category"]).copy()
+    if df_k.empty:
+        return [], []
+
+    cats = df_k.groupby("Category")["net"].sum().nlargest(6).index.tolist()
+    df_k["seg"] = df_k["CustomerID"].map(rf["seg"])
+    df_k = df_k.dropna(subset=["seg"])
+    if df_k.empty:
+        return [], []
+
+    toplam_net = max(1e-9, float(df_k["net"].sum()))
+    genel_pay = df_k.groupby("Category")["net"].sum() / toplam_net
+
+    mat = []
+    for s in range(6):
+        sub = df_k[df_k["seg"] == s]
+        s_top = float(sub["net"].sum())
+        if s_top <= 0:
+            mat.append([100 for _ in cats])
+            continue
+        s_pay = sub.groupby("Category")["net"].sum() / s_top
+        satir = [int(round(float(s_pay.get(c, 0.0) / max(1e-9, genel_pay.get(c, 1e-9)) * 100.0))) for c in cats]
+        mat.append(satir)
+    return cats, mat
+
+
+def haftalik(tum: pd.DataFrame, urun: str) -> tuple[np.ndarray, np.ndarray]:
+    min_g, max_g = tum["gun"].min(), tum["gun"].max()
+    idx = pd.date_range(min_g, max_g, freq="D")
+    u_df = tum[tum["Description"] == urun]
+    gunluk = u_df.groupby("gun")["Quantity"].sum().reindex(idx, fill_value=0.0).values.astype(float)
+    n_haf = len(gunluk) // 7
+    wk = gunluk[: n_haf * 7].reshape(-1, 7).sum(axis=1)
+    return wk, gunluk
+
+
+def geri_test(wk: np.ndarray) -> tuple[list[dict], int]:
+    """Son 12 haftada 3 tahmin modelini geriye dönük test eder ve en düşük WAPE'li modeli seçer."""
+    n = len(wk)
+    test_len = min(12, max(4, n // 3))
+    bas = n - test_len
+
+    sonuc = []
+    for ad, fn in MODELLER:
+        fcs = []
+        err4 = 0.0
+        act4 = 0.0
+        for t in range(bas, n):
+            gecmis = wk[:t]
+            tah_1 = fn(gecmis, 1)[0]
+            fcs.append(float(tah_1))
+            if t + 4 <= n:
+                tah_4 = sum(fn(gecmis, 4))
+                ger_4 = float(np.sum(wk[t : t + 4]))
+                err4 += abs(tah_4 - ger_4)
+                act4 += ger_4
+        fcs_arr = np.array(fcs, dtype=float)
+        ger_arr = wk[bas:n]
+        if act4 > 0:
+            wape = float(err4 / act4)
+        else:
+            wape = float(np.sum(np.abs(fcs_arr - ger_arr)) / max(1.0, float(np.sum(ger_arr))))
+        sd = float(np.std(ger_arr - fcs_arr, ddof=0)) if len(ger_arr) else 1.0
+        sonuc.append({"ad": ad, "f": fn, "wape": wape, "sd": max(1.0, sd), "fcs": fcs_arr.tolist()})
+
+    en = int(np.argmin([r["wape"] for r in sonuc]))
+    return sonuc, en
+
+
+def _z_degeri(sl: int) -> float:
+    tablo = {
+        85: 1.036, 86: 1.080, 87: 1.126, 88: 1.175, 89: 1.227,
+        90: 1.282, 91: 1.341, 92: 1.405, 93: 1.476, 94: 1.555,
+        95: 1.645, 96: 1.751, 97: 1.881, 98: 2.054, 99: 2.326,
+    }
+    return tablo.get(int(sl), 1.645)
+
+
+def stok(wk: np.ndarray, gunluk: np.ndarray, lt: int, sl: int) -> dict:
+    """Güvenlik stoğu, sipariş noktası ve son 26 haftalık günlük stok simülasyonunu hesaplar."""
+    son_wk = wk[-26:] if len(wk) >= 26 else wk
+    mu = float(np.mean(son_wk)) if len(son_wk) else 0.0
+    sd = float(np.std(son_wk, ddof=0)) if len(son_wk) else 0.0
+    z = _z_degeri(sl)
+
+    ss = float(z * sd * np.sqrt(lt))
+    rop = float(mu * lt + ss)
+
+    sim_gun = gunluk[-182:] if len(gunluk) >= 182 else gunluk
+    n_gun = len(sim_gun)
+    sip_miktari = max(1.0, mu * 4.0)
+    lt_gun = max(1, int(lt) * 7)
+
+    eldeki = rop + mu * 2.0
+    yoldaki: list[tuple[int, float]] = []
+    ser = []
+    outd = []
+
+    for g_idx, talep in enumerate(sim_gun):
+        # Teslimatları ekle
+        yeni_yoldaki = []
+        for varis_gunu, mik in yoldaki:
+            if varis_gunu <= g_idx:
+                eldeki += mik
+            else:
+                yeni_yoldaki.append((varis_gunu, mik))
+        yoldaki = yeni_yoldaki
+
+        # Günlük satış
+        if eldeki >= talep:
+            eldeki -= talep
+        else:
+            eldeki = 0.0
+            outd.append(g_idx)
+
+        ser.append(float(eldeki))
+
+        # Sipariş noktası kontrolü
+        toplam_pozisyon = eldeki + sum(m for _, m in yoldaki)
+        if toplam_pozisyon <= rop:
+            yoldaki.append((g_idx + lt_gun, sip_miktari))
+
+    return {
+        "ss": ss,
+        "rop": rop,
+        "mu": mu,
+        "out": len(outd),
+        "n": n_gun,
+        "outd": outd,
+        "ser": ser,
+    }
+
+
+def mevsimsellik(tum: pd.DataFrame) -> tuple[list[str], list[list[int]], int]:
+    """En çok satan 8 kategorinin 12 aylık mevsimsellik endeksini (100 = ortalama) döndürür."""
+    if tum.empty:
+        return [], [], 2020
+    yil = int(tum["gun"].dt.year.mode().iloc[0])
+    d = tum[(tum["gun"].dt.year == yil) & tum["Category"].notna()]
+    if d.empty:
+        return [], [], yil
+
+    cats = d.groupby("Category")["Quantity"].sum().nlargest(8).index.tolist()
+    piv = (
+        d[d["Category"].isin(cats)]
+        .assign(ay=d["gun"].dt.month)
+        .pivot_table(index="Category", columns="ay", values="Quantity", aggfunc="sum", fill_value=0.0)
+        .reindex(index=cats, columns=range(1, 13), fill_value=0.0)
+    )
+    ort = piv.mean(axis=1).replace(0, 1.0)
+    endeks = piv.div(ort, axis=0) * 100.0
+    sm = [[int(round(v)) for v in endeks.loc[c].values] for c in cats]
+    return cats, sm, yil
+
+
+def satissiz(tum: pd.DataFrame) -> pd.DataFrame:
+    """Her ürünün veri bitiş tarihi itibarıyla kaç gündür satılmadığını hesaplar."""
+    if tum.empty:
+        return pd.DataFrame(columns=["gun", "kategori", "adet", "net"])
+    bit = tum["gun"].max()
+    g = tum.groupby("Description").agg(
+        son=("gun", "max"),
+        kategori=("Category", "first"),
+        adet=("Quantity", "sum"),
+        net=("net", "sum"),
+    )
+    g["kategori"] = g["kategori"].fillna("Belirsiz")
+    g["gun"] = (bit - g["son"]).dt.days.astype(int)
+    return g[["gun", "kategori", "adet", "net"]]
+
+an2 = types.SimpleNamespace(
+    MODELLER=MODELLER,
+    POLITIKA=POLITIKA,
+    SEG_AD=SEG_AD,
+    SEG_ACIKLAMA=SEG_ACIKLAMA,
+    SEG_RENK=SEG_RENK,
+    SEG_YAZI=SEG_YAZI,
+    seg_of=seg_of,
+    baz_tahmin30=baz_tahmin30,
+    norm_asimi=norm_asimi,
+    abc_xyz=abc_xyz,
+    yavas_urunler=yavas_urunler,
+    musteri_degisim=musteri_degisim,
+    aylik=aylik,
+    kohort_ceyrek=kohort_ceyrek,
+    rfm=rfm,
+    gecikme=gecikme,
+    il_dagilimi=il_dagilimi,
+    kategori_endeksi=kategori_endeksi,
+    haftalik=haftalik,
+    geri_test=geri_test,
+    stok=stok,
+    mevsimsellik=mevsimsellik,
+    satissiz=satissiz,
+)
+
+
+# ======================================================================
+# 4. ARAYÜZ, TEMA CSS VE SOL FİLTRE MENÜSÜ (ui)
+# ======================================================================
+
+RENK = {
+    "yesil": "#3d9a84",
+    "kirmizi": "#d0574f",
+    "sari": "#e0a526",
+    "lacivert": "#1f2a44",
+    "turuncu": "#d9622b",
+    "mavi": "#3b6fd1",
+}
+
+AYLAR = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+
+SAYFALAR_META = [
+    ("yonetici", "Yönetici Özeti", "#1f2a44", "🟦"),
+    ("satis", "Satış & Fiyat", "#3d9a84", "🟩"),
+    ("pazarlama", "Pazarlama & Müşteri", "#d9622b", "🟧"),
+    ("tedarik", "Tedarik Zinciri", "#3b6fd1", "🟦"),
+    ("kalite", "Veri Kalitesi", "#e0a526", "🟨"),
+]
+
+ROLLER_META = [
+    ("yonetici", "Yönetici"),
+    ("satis", "Satış"),
+    ("pazarlama", "Pazarlama"),
+    ("tedarik", "Tedarik Zinciri"),
+]
+
+
+def sayi(val, dec: int = 0) -> str:
+    """Türkçe sayı biçimlendirme (binlik nokta, ondalık virgül)."""
+    if val is None or (isinstance(val, (float, np.floating)) and (math.isnan(val) or math.isinf(val))):
+        return "0"
+    try:
+        v = float(val)
+    except Exception:
+        return str(val)
+    if dec <= 0:
+        return f"{int(round(v)):,}".replace(",", ".")
+    s = f"{v:,.{dec}f}"
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def tl(val) -> str:
+    """Türkçe para birimi biçimlendirme."""
+    if val is None or (isinstance(val, (float, np.floating)) and (math.isnan(val) or math.isinf(val))):
+        return "0 ₺"
+    v = float(val)
+    isaret_str = "−" if v < 0 else ""
+    av = abs(v)
+    if av >= 1_000_000:
+        return f"{isaret_str}{sayi(av / 1_000_000, 2)} M ₺"
+    return f"{isaret_str}{sayi(av, 0)} ₺"
+
+
+def isaret(val, dec: int = 1) -> str:
+    """Artı veya eksi işaretli sayı."""
+    if val is None or (isinstance(val, (float, np.floating)) and (math.isnan(val) or math.isinf(val))):
+        return "+0"
+    v = float(val)
+    on = "+" if v >= 0 else "−"
+    return f"{on}{sayi(abs(v), dec)}"
+
+
+def _to_date(d) -> datetime.date:
+    if isinstance(d, pd.Timestamp):
+        return d.date()
+    if isinstance(d, datetime.datetime):
+        return d.date()
+    if isinstance(d, datetime.date):
+        return d
+    return pd.Timestamp(d).date()
+
+
+def tarih_etiketi(a, b) -> str:
+    """Tarih veya tarih aralığını Türkçe kısa biçimde döndürür."""
+    da, db = _to_date(a), _to_date(b)
+    if da == db:
+        return f"{da.day} {AYLAR[da.month - 1]} {da.year}"
+    if da.year == db.year:
+        return f"{da.day} {AYLAR[da.month - 1]} – {db.day} {AYLAR[db.month - 1]} {db.year}"
+    return f"{da.day} {AYLAR[da.month - 1]} {da.year} – {db.day} {AYLAR[db.month - 1]} {db.year}"
+
+
+def _inject_css(aktif_sayfa: str = ""):
+    aktif_renk = dict((k, c) for k, _, c, _ in SAYFALAR_META).get(aktif_sayfa, "#1f2a44")
+    st.markdown(
+        f"""
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+        <style>
+        :root {{
+            --bg: #f6f3ee;
+            --fg: #1f2a44;
+            --muted: #5b6475;
+            --card: #ffffff;
+            --side: #faf7f2;
+            --line: #e4dfd6;
+            --green: #3d9a84;
+            --amber: #e0a526;
+            --red: #d0574f;
+            --orange: #d9622b;
+            --blue: #3b6fd1;
+        }}
+        .stApp {{
+            background-color: var(--bg) !important;
+            color: var(--fg);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }}
+        /* Varsayılan Streamlit sayfa menüsünü gizle (kendi HTML birebir menümüzü kullanıyoruz) */
+        [data-testid="stSidebarNav"] {{
+            display: none !important;
+        }}
+        .block-container {{
+            padding-top: 1.5rem !important;
+            padding-bottom: 4.5rem !important;
+            max-width: 1440px !important;
+        }}
+        section[data-testid="stSidebar"] {{
+            background-color: #faf7f2 !important;
+            border-right: 1px solid #e4dfd6 !important;
+            min-width: 245px !important;
+            max-width: 265px !important;
+        }}
+        section[data-testid="stSidebar"] .block-container {{
+            padding: 1.1rem 0.95rem 1.5rem 0.95rem !important;
+        }}
+        /* Sol menüdeki sayfa butonları (RafRadar_dashboard.html .nav görünümü) */
+        section[data-testid="stSidebar"] div.stButton > button {{
+            width: 100%;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            padding: 7px 10px !important;
+            min-height: 36px !important;
+            border-radius: 8px !important;
+            border: 1px solid transparent !important;
+            background: transparent !important;
+            color: #1f2a44 !important;
+            font-family: 'Inter', sans-serif !important;
+            font-size: 13px !important;
+            font-weight: 500 !important;
+            box-shadow: none !important;
+            margin: 1px 0 !important;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button:hover {{
+            background: rgba(31, 42, 68, 0.05) !important;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {{
+            background: #ffffff !important;
+            font-weight: 600 !important;
+            border: 1px solid #e4dfd6 !important;
+            box-shadow: inset 4px 0 0 {aktif_renk} !important;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button p {{
+            font-size: 12.5px !important;
+            color: #1f2a44 !important;
+            margin: 0 !important;
+        }}
+        /* Sol menü selectbox ve date_input kutularını HTML tasarımla eşitle */
+        section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] div[data-baseweb="input"] > div {{
+            background-color: #ffffff !important;
+            border: 1px solid #cfc9bd !important;
+            border-radius: 8px !important;
+            font-size: 12px !important;
+            min-height: 36px !important;
+        }}
+        section[data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {{
+            font-size: 12px !important;
+            color: #5b6475 !important;
+            font-weight: 400 !important;
+        }}
+        .rr-side-hdr {{
+            font-size: 11px;
+            font-weight: 600;
+            color: #5b6475;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin: 10px 0 4px 0;
+        }}
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+            background-color: #ffffff !important;
+            border: 1px solid #e4dfd6 !important;
+            border-radius: 12px !important;
+            padding: 14px 16px !important;
+            box-shadow: 0 1px 2px rgba(31, 42, 68, 0.02);
+        }}
+        h1, h2, h3, .h {{
+            font-family: 'Poppins', sans-serif !important;
+            color: #1f2a44;
+        }}
+        .rr-page-header {{
+            margin-bottom: 10px;
+        }}
+        .rr-page-header h1 {{
+            font-size: 27px !important;
+            font-weight: 700 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            line-height: 1.2 !important;
+            color: #1f2a44 !important;
+        }}
+        .rr-page-header p {{
+            margin: 4px 0 0 0 !important;
+            font-size: 14px !important;
+            font-style: italic;
+            color: #5b6475 !important;
+        }}
+        .h {{
+            font-weight: 600;
+            font-size: 15px;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            color: #1f2a44;
+        }}
+        .sub {{
+            font-size: 12px;
+            color: #5b6475;
+            margin: 2px 0 6px 0;
+            line-height: 1.4;
+        }}
+        .num {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 21px;
+            height: 21px;
+            border-radius: 50%;
+            background: #1f2a44;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 600;
+            margin-right: 8px;
+            flex-shrink: 0;
+        }}
+        .card {{
+            background: #ffffff;
+            border: 1px solid #e4dfd6;
+            border-radius: 12px;
+            padding: 15px 17px;
+            box-sizing: border-box;
+        }}
+        .kgrid {{
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+            margin: 10px 0 6px 0;
+        }}
+        .kgrid.k6 {{
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+        }}
+        @media (max-width: 1100px) {{
+            .kgrid, .kgrid.k6 {{
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }}
+        }}
+        .kpi {{
+            background: #ffffff;
+            border: 1px solid #e4dfd6;
+            border-top: 4px solid #3d9a84;
+            border-radius: 12px;
+            padding: 12px 14px;
+            box-sizing: border-box;
+        }}
+        .kpi.y {{
+            border-top-color: #e0a526;
+        }}
+        .kl {{
+            font-size: 12px;
+            color: #5b6475;
+        }}
+        .kv {{
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 21px;
+            margin: 2px 0;
+            color: #1f2a44;
+        }}
+        .kv2 {{
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 15px;
+            margin: 2px 0;
+            color: #1f2a44;
+        }}
+        .rule {{
+            border-top: 1px dashed #d9d3c7;
+            margin: 8px 0 6px 0;
+        }}
+        .chg {{
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 999px;
+            white-space: nowrap;
+        }}
+        .pos {{ background: #d6ece5; color: #14513f; }}
+        .neg {{ background: #fbe3e0; color: #8f2a24; }}
+        .mute {{ background: #f0ebe2; color: #5b6475; }}
+        .neu {{ background: #e4e7ee; color: #2b3550; }}
+        .pill {{
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 500;
+            padding: 3px 9px;
+            border-radius: 999px;
+            background: #f0ebe2;
+            color: #1f2a44;
+            margin: 2px 4px 2px 0;
+        }}
+        .pill.g {{ background: #d6ece5; color: #14513f; }}
+        .pill.y {{ background: #fdf0cf; color: #7a5600; }}
+        .pill.r {{ background: #fbe3e0; color: #8f2a24; }}
+        .out {{
+            border-radius: 10px;
+            padding: 9px 11px;
+            background: #eaf4f0;
+        }}
+        .out .t {{
+            font-size: 11px;
+            color: #5b6475;
+        }}
+        .out .v {{
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 16px;
+            color: #1f2a44;
+        }}
+        table.t {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            margin-top: 6px;
+        }}
+        table.t th, table.t td {{
+            padding: 7px 8px;
+            border-bottom: 1px solid #ece7dd;
+            text-align: left;
+            vertical-align: middle;
+        }}
+        table.t th {{
+            font-size: 11px;
+            color: #5b6475;
+            font-weight: 600;
+            background: #faf7f2;
+        }}
+        table.t td.r, table.t th.r {{
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }}
+        .hm td {{
+            text-align: center;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 7px 4px;
+            border: 2px solid #fff;
+            border-radius: 4px;
+        }}
+        .hm th {{
+            font-size: 11px;
+            color: #5b6475;
+            padding: 4px;
+            text-align: center;
+            background: none;
+            border: none;
+        }}
+        ol.lst {{
+            margin: 6px 0 0 0;
+            padding-left: 18px;
+            font-size: 12px;
+            line-height: 1.5;
+        }}
+        ol.lst li {{
+            margin: 4px 0;
+        }}
+        ol.lst small {{
+            color: #5b6475;
+        }}
+        .info {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: #e4dfd6;
+            color: #1f2a44;
+            font-size: 10px;
+            font-weight: 700;
+            font-style: normal;
+            cursor: help;
+            position: relative;
+            vertical-align: middle;
+            margin-left: 4px;
+        }}
+        .info:hover::after {{
+            content: attr(data-tip);
+            position: absolute;
+            left: 50%;
+            bottom: 130%;
+            transform: translateX(-50%);
+            width: 240px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: #1f2a44;
+            color: #fff;
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            font-weight: 400;
+            line-height: 1.4;
+            text-align: left;
+            white-space: normal;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+            z-index: 9999;
+            pointer-events: none;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def baslik(title: str, sub: str = ""):
+    """Sayfa üst başlığını ve global CSS'i basar."""
+    eslesme = {
+        "Yönetici Özeti": "yonetici",
+        "Satış & Fiyat": "satis",
+        "Pazarlama & Müşteri": "pazarlama",
+        "Tedarik Zinciri": "tedarik",
+        "Veri Kalitesi": "kalite",
+        "Veri setini yükle": "yukle",
+    }
+    aktif = eslesme.get(title, "")
+    st.session_state["_aktif_sayfa"] = aktif
+    _inject_css(aktif)
+    if aktif == "yukle":
+        st.markdown(
+            "<style>section[data-testid='stSidebar']{display:none !important;}</style>",
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        f"<div class='rr-page-header'><h1>{title}</h1><p>{sub}</p></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def bolum(num: int, title: str, sub: str = ""):
+    """Numaralı bölüm başlığını basar."""
+    sub_html = f"<div class='sub'>{sub}</div>" if sub else ""
+    st.markdown(
+        f"<div class='h'><span class='num'>{num}</span><span>{title}</span></div>{sub_html}",
+        unsafe_allow_html=True,
+    )
+
+
+def _preset_dates(preset: str, min_d: datetime.date, max_d: datetime.date, ref_a: datetime.date = None, ref_b: datetime.date = None):
+    y = max_d.year
+    if preset == "Geçtiğimiz yıl":
+        a, b = datetime.date(y, 1, 1), datetime.date(y, 12, 31)
+    elif preset == "Geçtiğimiz ay":
+        a, b = datetime.date(y, 12, 1), datetime.date(y, 12, 31)
+    elif preset == "Son çeyrek":
+        a, b = datetime.date(y, 10, 1), datetime.date(y, 12, 31)
+    elif preset == "İlk yarıyıl":
+        a, b = datetime.date(y, 1, 1), datetime.date(y, 6, 30)
+    elif preset == "Son yarıyıl":
+        a, b = datetime.date(y, 7, 1), datetime.date(y, 12, 31)
+    elif preset == "Önceki dönem" and ref_a is not None and ref_b is not None:
+        uzunluk = max(1, (ref_b - ref_a).days + 1)
+        b = max(min_d, ref_a - datetime.timedelta(days=1))
+        a = max(min_d, b - datetime.timedelta(days=uzunluk - 1))
+    else:
+        return None, None
+    return max(min_d, min(max_d, a)), max(min_d, min(max_d, b))
+
+
+def _sayfa_degistir(hedef_id: str):
+    sayfa_map = st.session_state.get("_sayfa_nesneleri") or {}
+    if hedef_id in sayfa_map:
+        st.switch_page(sayfa_map[hedef_id])
+
+
+def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.date, datetime.date, datetime.date]:
+    """RafRadar_dashboard (3).html'deki sol menüyü (Logo, ROL, SAYFALAR, FİLTRELER, İlk açılış ekranı) birebir oluşturur."""
+    min_d = tum["gun"].min().date()
+    max_d = tum["gun"].max().date()
+
+    def_a = max(min_d, min(max_d, datetime.date(2020, 11, 1)))
+    def_b = max(min_d, min(max_d, datetime.date(2020, 12, 14)))
+    def_ca = max(min_d, min(max_d, datetime.date(2020, 9, 1)))
+    def_cb = max(min_d, min(max_d, datetime.date(2020, 10, 31)))
+
+    ss = st.session_state
+    ss.setdefault("a", def_a)
+    ss.setdefault("b", def_b)
+    ss.setdefault("ca", def_ca)
+    ss.setdefault("cb", def_cb)
+    ss.setdefault("f_kat", "Tümü")
+    ss.setdefault("f_urun", "Tümü")
+    ss.setdefault("f_sehir", "Tümü")
+
+    aktif_sayfa = ss.get("_aktif_sayfa", "yonetici")
+
+    with st.sidebar:
+        # 1. LOGO & BAŞLIK (HTML ile birebir)
+        st.markdown(
+            """
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <svg width="28" height="26" viewBox="0 0 28 26" aria-hidden="true">
+                    <rect x="2" y="10" width="6" height="14" fill="#1f2a44"/>
+                    <rect x="11" y="3" width="6" height="21" fill="#3d9a84"/>
+                    <rect x="20" y="14" width="6" height="10" fill="#e0a526"/>
+                </svg>
+                <span style="font-family:Poppins,sans-serif;font-weight:700;font-size:20px;color:#1f2a44">RafRadar</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # 2. ROL SEÇİCİ (HTML'deki gibi: Yönetici, Satış, Pazarlama, Tedarik Zinciri)
+        st.markdown("<div class='rr-side-hdr'>ROL</div>", unsafe_allow_html=True)
+        rol_ids = [r[0] for r in ROLLER_META]
+        rol_adlar = [r[1] for r in ROLLER_META]
+        mevcut_rol_idx = rol_ids.index(aktif_sayfa) if aktif_sayfa in rol_ids else 0
+        secilen_rol_ad = st.selectbox(
+            "ROL",
+            rol_adlar,
+            index=mevcut_rol_idx,
+            key=f"sb_rol_{aktif_sayfa}",
+            label_visibility="collapsed",
+        )
+        hedef_rol_id = rol_ids[rol_adlar.index(secilen_rol_ad)]
+        if hedef_rol_id != aktif_sayfa and aktif_sayfa in rol_ids:
+            _sayfa_degistir(hedef_rol_id)
+
+        # 3. SAYFALAR MENÜSÜ (HTML'deki renkli noktalı 5 sayfa)
+        st.markdown("<div class='rr-side-hdr' style='margin-top:12px'>SAYFALAR</div>", unsafe_allow_html=True)
+        for pid, pname, pcolor, picon in SAYFALAR_META:
+            aktif_mi = pid == aktif_sayfa
+            if st.button(
+                f"{picon}  {pname}",
+                key=f"sb_nav_{pid}",
+                type="primary" if aktif_mi else "secondary",
+                use_container_width=True,
+            ):
+                if not aktif_mi:
+                    _sayfa_degistir(pid)
+
+        # 4. FİLTRELER BÖLÜMÜ (HTML ile birebir sıra ve yapı)
+        st.markdown("<div class='rr-side-hdr' style='margin-top:14px'>FİLTRELER</div>", unsafe_allow_html=True)
+
+        # Tarih aralığı
+        hazir_secenekler = ["Geçtiğimiz yıl", "Geçtiğimiz ay", "Son çeyrek", "İlk yarıyıl", "Son yarıyıl", "Özel (takvim)"]
+        hazir_varsayilan = ss.get("f_hazir", "Özel (takvim)")
+        hazir_idx = hazir_secenekler.index(hazir_varsayilan) if hazir_varsayilan in hazir_secenekler else 5
+        hazir = st.selectbox("Tarih aralığı", hazir_secenekler, index=hazir_idx, key="f_hazir")
+        if hazir != "Özel (takvim)":
+            pa, pb = _preset_dates(hazir, min_d, max_d)
+            if pa and pb:
+                ss["a"], ss["b"] = pa, pb
+            a, b = ss["a"], ss["b"]
+            st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:#5b6475'>{tarih_etiketi(a, b)}</div>", unsafe_allow_html=True)
+        else:
+            c1, c2 = st.columns(2)
+            a = c1.date_input("Başlangıç", value=ss["a"], min_value=min_d, max_value=max_d, key="inp_a", label_visibility="collapsed")
+            b = c2.date_input("Bitiş", value=ss["b"], min_value=min_d, max_value=max_d, key="inp_b", label_visibility="collapsed")
+            if a > b:
+                a, b = b, a
+            ss["a"], ss["b"] = a, b
+
+        # Karşılaştırma aralığı
+        kars_secenekler = ["Geçtiğimiz yıl", "Geçtiğimiz ay", "Son çeyrek", "İlk yarıyıl", "Son yarıyıl", "Önceki dönem", "Özel (takvim)"]
+        kars_varsayilan = ss.get("f_kars", "Özel (takvim)")
+        kars_idx = kars_secenekler.index(kars_varsayilan) if kars_varsayilan in kars_secenekler else 6
+        kars = st.selectbox("Karşılaştırma aralığı", kars_secenekler, index=kars_idx, key="f_kars")
+        if kars != "Özel (takvim)":
+            pca, pcb = _preset_dates(kars, min_d, max_d, a, b)
+            if pca and pcb:
+                ss["ca"], ss["cb"] = pca, pcb
+            ca, cb = ss["ca"], ss["cb"]
+            st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:#5b6475'>{tarih_etiketi(ca, cb)}</div>", unsafe_allow_html=True)
+        else:
+            cc1, cc2 = st.columns(2)
+            ca = cc1.date_input("Karş. başlangıç", value=ss["ca"], min_value=min_d, max_value=max_d, key="inp_ca", label_visibility="collapsed")
+            cb = cc2.date_input("Karş. bitiş", value=ss["cb"], min_value=min_d, max_value=max_d, key="inp_cb", label_visibility="collapsed")
+            if ca > cb:
+                ca, cb = cb, ca
+            ss["ca"], ss["cb"] = ca, cb
+
+        # Kategori, Ürün, Şehir
+        kategoriler = ["Tümü"] + sorted(tum["Category"].dropna().unique().tolist())
+        f_kat = st.selectbox("Kategori", kategoriler, index=kategoriler.index(ss["f_kat"]) if ss["f_kat"] in kategoriler else 0, key="f_kat")
+
+        df_kat = tum if f_kat == "Tümü" else tum[tum["Category"] == f_kat]
+        en_cok_urunler = df_kat.groupby("Description")["net"].sum().nlargest(250).index.tolist()
+        urun_secenekler = ["Tümü"] + en_cok_urunler
+        f_urun = st.selectbox("Ürün", urun_secenekler, index=urun_secenekler.index(ss["f_urun"]) if ss["f_urun"] in urun_secenekler else 0, key="f_urun")
+
+        sehirler = ["Tümü"] + sorted(tum["City"].dropna().unique().tolist())
+        f_sehir = st.selectbox("Şehir", sehirler, index=sehirler.index(ss["f_sehir"]) if ss["f_sehir"] in sehirler else 0, key="f_sehir")
+
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+        if st.button("Filtreleri sıfırla", key="sb_reset_btn", use_container_width=True):
+            for k in ("a", "b", "ca", "cb", "f_kat", "f_urun", "f_sehir", "f_hazir", "f_kars", "inp_a", "inp_b", "inp_ca", "inp_cb"):
+                ss.pop(k, None)
+            st.rerun()
+
+        st.markdown("<div style='border-top:1px dashed #cfc9bd;margin:10px 0 6px'></div>", unsafe_allow_html=True)
+        if st.button("📂 İlk açılış ekranı (veri yükle)", key="sb_yukle_btn", use_container_width=True):
+            _sayfa_degistir("yukle")
+
+    m = tum
+    if f_kat != "Tümü":
+        m = m[m["Category"] == f_kat]
+    if f_urun != "Tümü":
+        m = m[m["Description"] == f_urun]
+    if f_sehir != "Tümü":
+        m = m[m["City"] == f_sehir]
+
+    return m, a, b, ca, cb
+
+
+def plot(fig):
+    """Plotly grafiğini RafRadar temasıyla basar."""
+    fig.update_layout(
+        font=dict(family="Inter, system-ui, sans-serif", color="#1f2a44", size=11),
+        paper_bgcolor="white",
+        hoverlabel=dict(bgcolor="#1f2a44", font_color="white", font_family="Inter, sans-serif", font_size=12),
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def xlsx(df: pd.DataFrame, sheet_name: str = "Veri") -> bytes:
+    """DataFrame'i Excel (.xlsx) byte dizisine dönüştürür."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+    return buf.getvalue()
+
+ui = types.SimpleNamespace(
+    RENK=RENK,
+    AYLAR=AYLAR,
+    sayi=sayi,
+    tl=tl,
+    isaret=isaret,
+    tarih_etiketi=tarih_etiketi,
+    baslik=baslik,
+    bolum=bolum,
+    filtreler=filtreler,
+    plot=plot,
+    xlsx=xlsx,
+)
+
+
+# ======================================================================
+# 5. ORTAK BİLEŞENLER VE TABLOLAR (w)
+# ======================================================================
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+AY_AD = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+
+
+def fk() -> tuple:
+    """Aktif filtre önbellek anahtarı."""
+    ss = st.session_state
+    return (
+        ss.get("dosya_adi", ""),
+        ss.get("f_kat", "Tümü"),
+        ss.get("f_urun", "Tümü"),
+        ss.get("f_sehir", "Tümü"),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def ozet_c(_m, K, a, b) -> dict:
+    return an.ozet(_m, a, b)
+
+
+@st.cache_data(show_spinner="Churn modeli eğitiliyor…")
+def churn_c(_tum, vid):
+    return an.churn_modeli(_tum)
+
+
+@st.cache_data(show_spinner=False)
+def birlikte_c(_m, K, a, b):
+    x = an.araliga_kes(_m, a, b)
+    return an.birlikte(x, limit=12)
+
+
+def rel(a, b) -> float:
+    return (a / b - 1.0) if b else 0.0
+
+
+def chg(x: float, vurgu: bool = True) -> str:
+    sinif = "mute" if not vurgu else ("neg" if x < 0 else "pos")
+    ok = "▲ %" if x >= 0 else "▼ %"
+    return f"<span class='chg {sinif}'>{ok}{ui.sayi(abs(x * 100), 1)}</span>"
+
+
+def chg_p(d: float, vurgu: bool = True) -> str:
+    sinif = "neu" if vurgu else "mute"
+    ok = "▲ " if d >= 0 else "▼ "
+    return f"<span class='chg {sinif}'>{ok}{ui.sayi(abs(d * 100), 1)} puan</span>"
+
+
+def ust_bilgi(S: dict, C: dict, a, b, ca, cb) -> str:
+    ayni = S["gun"] == C["gun"]
+    et = ui.tarih_etiketi
+    not_txt = (
+        "Aralıklar eşit uzunlukta: vurgulu fark nominal değerlere göre"
+        if ayni
+        else "Aralık uzunlukları farklı: vurgulu fark günlük ortalamaya göre"
+    )
+    return (
+        f"<div style='margin:4px 0 6px'>"
+        f"<span class='pill g'>Seçili: {et(a, b)} · {S['gun']} gün</span>"
+        f"<span style='font-size:12px;color:#5b6475;margin:0 4px'>karşılaştırma</span>"
+        f"<span class='pill'>{et(ca, cb)} · {C['gun']} gün</span>"
+        f"<span class='pill y'>{not_txt}</span>"
+        f"</div>"
+    )
+
+
+def kart(baslik: str, nom: str, nom_c: str, gun_et: str, gun_v: str, gun_c: str, renk: str = "#3d9a84") -> str:
+    return (
+        f"<div class='kpi' style='border-top-color:{renk}'>"
+        f"<div class='kl'>{baslik}</div>"
+        f"<div class='kv'>{nom}</div>{nom_c}"
+        f"<div class='rule'></div>"
+        f"<div class='kl'>{gun_et}</div>"
+        f"<div class='kv2'>{gun_v}</div>{gun_c}"
+        f"</div>"
+    )
+
+
+def kgrid(cards: list[str], cls: str = ""):
+    st.markdown(f"<div class='kgrid {cls}'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
+def not_kutusu(txt: str):
+    st.markdown(f"<p class='sub' style='margin:6px 0 12px'>{txt}</p>", unsafe_allow_html=True)
+
+
+def vurgu(txt: str):
+    st.markdown(
+        f"<div style='font-size:13px;font-weight:600;color:#1f2a44;margin:4px 0 8px'>{txt}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def info(tip_txt: str) -> str:
+    temiz = tip_txt.replace("'", "&#39;").replace('"', "&quot;")
+    return f"<span class='info' data-tip='{temiz}'>i</span>"
+
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def mix(c1: str, c2: str, t: float) -> str:
+    t = max(0.0, min(1.0, float(t)))
+    r1, g1, b1 = _hex_to_rgb(c1)
+    r2, g2, b2 = _hex_to_rgb(c2)
+    r = int(round(r1 + (r2 - r1) * t))
+    g = int(round(g1 + (g2 - g1) * t))
+    b = int(round(b1 + (b2 - b1) * t))
+    return f"rgb({r},{g},{b})"
+
+
+def tablo(basliklar: list[str], satirlar: list[list[str]], sag: tuple = (), stil: list[str] | None = None) -> str:
+    th = "".join(f"<th class='{'r' if i in sag else ''}'>{b}</th>" for i, b in enumerate(basliklar))
+    trs = []
+    for idx, s in enumerate(satirlar):
+        row_style = f" style='{stil[idx]}'" if stil and idx < len(stil) and stil[idx] else ""
+        tds = "".join(f"<td class='{'r' if i in sag else ''}'>{c}</td>" for i, c in enumerate(s))
+        trs.append(f"<tr{row_style}>{tds}</tr>")
+    return f"<table class='t'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
+
+
+def sapma_tablo(rows: list[str], cols: list[str], mat: list[list[int]]) -> str:
+    """100 = ortalama endeks ısı haritası tablosu."""
+    th = "<th></th>" + "".join(f"<th>{c}</th>" for c in cols)
+    trs = []
+    for r_lbl, r_vals in zip(rows, mat):
+        tds = [f"<td style='text-align:left;font-weight:600;background:#faf7f2;color:#1f2a44'>{r_lbl}</td>"]
+        for v in r_vals:
+            if v >= 100:
+                t = min(1.0, (v - 100) / 80.0)
+                bg = mix("#f4f1ea", "#2f8a73", t)
+                fg = "#fff" if t > 0.55 else "#1f2a44"
+            else:
+                t = min(1.0, (100 - v) / 70.0)
+                bg = mix("#f4f1ea", "#d9622b", t * 0.65)
+                fg = "#fff" if t > 0.7 else "#1f2a44"
+            tds.append(f"<td style='background:{bg};color:{fg};font-weight:600'>{int(round(v))}</td>")
+        trs.append(f"<tr>{''.join(tds)}</tr>")
+    return f"<div style='overflow-x:auto'><table class='t hm'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>"
+
+w = types.SimpleNamespace(
+    XLSX=XLSX,
+    AY_AD=AY_AD,
+    fk=fk,
+    ozet_c=ozet_c,
+    churn_c=churn_c,
+    birlikte_c=birlikte_c,
+    rel=rel,
+    chg=chg,
+    chg_p=chg_p,
+    ust_bilgi=ust_bilgi,
+    kart=kart,
+    kgrid=kgrid,
+    not_kutusu=not_kutusu,
+    vurgu=vurgu,
+    info=info,
+    mix=mix,
+    tablo=tablo,
+    sapma_tablo=sapma_tablo,
+)
+
+
+# ======================================================================
+# 6. AYRAÇ AI — YÜZEN SOHBET ASİSTANI (chat)
+# ======================================================================
+
+
+def _sayfa_tespit(bilgi: dict) -> str:
+    """Bilgi sözlüğündeki ipuçlarından aktif sayfayı tahmin eder."""
+    c = str(bilgi.get("ciro") or "")
+    k = str(bilgi.get("kopru") or "")
+    ind = str(bilgi.get("indirim") or "")
+    if "baz tahmin" in c or "aksiyon" in ind:
+        return "yonetici"
+    if "en iyi yöntem" in k or "tedarik süresi" in ind:
+        return "tedarik"
+    if "geri dönen" in k or "Şampiyonlar" in c:
+        return "pazarlama"
+    if "ham " in c or "temizlendi" in c or "atılan" in c:
+        return "kalite"
+    return "satis"
+
+
+HIZLI_SORULAR = {
+    "yonetici": [
+        "Gelecek ay ne olur?",
+        "En çok getiren aksiyon",
+        "İlk kimi aramalı?",
+        "Ciro neden değişti?",
+        "En büyük 5 müşteri kim?",
+    ],
+    "satis": [
+        "Ciro neden düştü?",
+        "İlk kimi aramalı?",
+        "Fazla indirim ne kadar?",
+        "Birlikte alınanlar",
+        "Pazartesi yoğunluğu",
+    ],
+    "pazarlama": [
+        "Kaç müşteri kaybettik?",
+        "Yeni müşteri kalıyor mu?",
+        "Geciken müşteriler",
+        "En çok satan il hangisi?",
+        "RFM segmentleri",
+    ],
+    "tedarik": [
+        "8 hafta talep tahmini",
+        "Güvenlik stoğu ne kadar?",
+        "Satışsız ürünler",
+        "Düzensiz ürünler (AZ)",
+        "Hangi ay hangi kategori güçlü?",
+    ],
+    "kalite": [
+        "Kaç satır temizlendi?",
+        "Fazla indirim ne kadar?",
+        "Maliyet verisi var mı?",
+        "Tekrar eden satırlar",
+        "Metrik formülleri",
+    ],
+}
+
+
+def _tr_norm(s: str) -> str:
+    """Türkçe karakter duyarlı küçük harf dönüşümü (İ -> i, I -> ı)."""
+    return (
+        str(s)
+        .replace("İ", "i")
+        .replace("I", "ı")
+        .lower()
+        .replace("i\u0307", "i")
+    )
+
+
+def _canli_veri_ara(soru: str, tum: pd.DataFrame) -> str | None:
+    """Kullanıcının sorusunda geçen müşteri kodu, il, kategori veya ürün adını canlı veride arar."""
+    if tum is None or tum.empty:
+        return None
+
+    q_raw = soru.strip()
+    q_low = _tr_norm(q_raw)
+
+    # 1. Müşteri kodu sorgusu (örn. S00172, A00023, C00105 vb.)
+    m_kod = re.search(r"\b([A-Za-z]\d{4,6})\b", q_raw)
+    if m_kod:
+        cid = m_kod.group(1).upper()
+        sub = tum[tum["CustomerID"].str.upper() == cid]
+        if not sub.empty:
+            net = sub["net"].sum()
+            sip = sub["InvoiceNo"].nunique()
+            adet = sub["Quantity"].sum()
+            il = sub["City"].iloc[0]
+            son = sub["gun"].max()
+            pasif = (tum["gun"].max() - son).days
+            ort_ind = (1.0 - net / max(1.0, sub["gross"].sum())) * 100.0
+            en_kat = sub.groupby("Category")["net"].sum().idxmax() if sub["Category"].notna().any() else "—"
+            return (
+                f"<b>{cid}</b> ({il}) müşteri özeti:<br>"
+                f"• Toplam net ciro: <b>{ui.tl(net)}</b> ({ui.sayi(sip)} sipariş · {ui.sayi(adet)} adet)<br>"
+                f"• Ortalama indirim: <b>%{ui.sayi(ort_ind, 1)}</b> · En çok aldığı kategori: <b>{en_kat}</b><br>"
+                f"• Son sipariş: <b>{son:%d.%m.%Y}</b> ({pasif} gün önce)."
+            )
+
+    # 2. En büyük müşteriler / en çok alan müşteriler sorgusu
+    if re.search(r"en büyük.*müşteri|en çok.*müşteri|top.*müşteri|ilk 5 müşteri", q_low):
+        top5 = tum.groupby(["CustomerID", "City"]).agg(net=("net", "sum"), sip=("InvoiceNo", "nunique")).nlargest(5, "net")
+        satirlar = [f"{i}. <b>{cid}</b> ({il}): {ui.tl(r['net'])} ({ui.sayi(r['sip'])} sipariş)" for i, ((cid, il), r) in enumerate(top5.iterrows(), 1)]
+        return "Verideki en yüksek cirolu 5 müşteri:<br>" + "<br>".join(satirlar)
+
+    # 3. En çok satan ürünler sorgusu
+    if re.search(r"en çok satan ürün|best seller|en popüler kitap|ilk 5 ürün", q_low):
+        top5 = tum.groupby("Description").agg(adet=("Quantity", "sum"), net=("net", "sum")).nlargest(5, "adet")
+        satirlar = [f"{i}. <b>{u[:42]}</b>: {ui.sayi(r['adet'])} adet ({ui.tl(r['net'])})" for i, (u, r) in enumerate(top5.iterrows(), 1)]
+        return "Adet bazında en çok satan 5 ürün:<br>" + "<br>".join(satirlar)
+
+    # 4.En çok satan il sorgusu
+    if re.search(r"en çok satan il|hangi il|iller|şehirler", q_low):
+        top5 = tum.groupby("City").agg(net=("net", "sum"), mus=("CustomerID", "nunique"), sip=("InvoiceNo", "nunique")).nlargest(5, "net")
+        tot_net = max(1.0, tum["net"].sum())
+        satirlar = [
+            f"{i}. <b>{il}</b>: {ui.tl(r['net'])} (%{ui.sayi(r['net'] / tot_net * 100, 1)}) · {ui.sayi(r['mus'])} müşteri"
+            for i, (il, r) in enumerate(top5.iterrows(), 1)
+        ]
+        return "Ciroya göre ilk 5 il:<br>" + "<br>".join(satirlar)
+
+    # 5. Şehir / İl adı sorgusu
+    if "City" in tum.columns:
+        iller = tum["City"].dropna().unique().tolist()
+        for il in iller:
+            il_low = _tr_norm(il)
+            if len(il_low) >= 3 and re.search(rf"\b{re.escape(il_low)}", q_low):
+                sub = tum[tum["City"] == il]
+                net = sub["net"].sum()
+                pay = net / max(1.0, tum["net"].sum()) * 100.0
+                mus = sub["CustomerID"].nunique()
+                sip = sub["InvoiceNo"].nunique()
+                en_kat = sub.groupby("Category")["net"].sum().idxmax() if sub["Category"].notna().any() else "—"
+                return (
+                    f"<b>{il}</b> ili canlı veri özeti:<br>"
+                    f"• Net ciro: <b>{ui.tl(net)}</b> (tüm cironun <b>%{ui.sayi(pay, 1)}</b>'i)<br>"
+                    f"• Aktif müşteri: <b>{ui.sayi(mus)}</b> · Sipariş sayısı: <b>{ui.sayi(sip)}</b><br>"
+                    f"• En güçlü kategori: <b>{en_kat}</b>."
+                )
+
+    # 6. Kategori adı sorgusu
+    if "Category" in tum.columns:
+        kategoriler = sorted(tum["Category"].dropna().unique().tolist(), key=len, reverse=True)
+        for kat in kategoriler:
+            kat_low = _tr_norm(kat)
+            kelimeler = [w for w in re.split(r"[\s/&,-]+", kat_low) if len(w) >= 4]
+            if kat_low in q_low or any(re.search(rf"\b{re.escape(w)}", q_low) for w in kelimeler):
+                sub = tum[tum["Category"] == kat]
+                net = sub["net"].sum()
+                pay = net / max(1.0, tum["net"].sum()) * 100.0
+                adet = sub["Quantity"].sum()
+                ind = (1.0 - net / max(1.0, sub["gross"].sum())) * 100.0
+                en_urun = sub.groupby("Description")["Quantity"].sum().idxmax()
+                return (
+                    f"<b>{kat}</b> kategorisi canlı veri özeti:<br>"
+                    f"• Net ciro: <b>{ui.tl(net)}</b> (toplamın <b>%{ui.sayi(pay, 1)}</b>'i) · Satılan: <b>{ui.sayi(adet)} adet</b><br>"
+                    f"• Ortalama indirim: <b>%{ui.sayi(ind, 1)}</b><br>"
+                    f"• En çok satan ürünü: <b>{en_urun[:48]}</b>."
+                )
+
+    # 7. Ürün / Kitap adı arama (en az 4 harfli anlamlı kelime eşleşmesi)
+    stop_words = {
+        "nedir", "nasıl", "kadar", "hangi", "neden", "niçin", "kimler", "kime", "ürün", "ürünler",
+        "müşteri", "müşteriler", "sipariş", "ciro", "indirim", "stok", "tahmin", "hafta", "günlük",
+        "aylık", "yıllık", "satış", "fiyat", "pazarlama", "tedarik", "kalite", "segment", "analiz",
+    }
+    arama_kelimeleri = [w for w in re.findall(r"\w+", q_low) if len(w) >= 4 and w not in stop_words]
+    if arama_kelimeleri:
+        descs = tum["Description"].dropna().unique()
+        eslesen = [d for d in descs if all(k in _tr_norm(d) for k in arama_kelimeleri)]
+        if not eslesen and len(arama_kelimeleri) >= 1:
+            eslesen = [d for d in descs if arama_kelimeleri[0] in _tr_norm(d)]
+        if 1 <= len(eslesen) <= 15:
+            sec_u = eslesen[0]
+            sub = tum[tum["Description"] == sec_u]
+            net = sub["net"].sum()
+            adet = sub["Quantity"].sum()
+            sip = sub["InvoiceNo"].nunique()
+            liste_f = sub["UnitPrice"].median()
+            ind = (1.0 - net / max(1.0, sub["gross"].sum())) * 100.0
+            son = sub["gun"].max()
+            ek = f" (ve benzer {len(eslesen) - 1} ürün)" if len(eslesen) > 1 else ""
+            return (
+                f"<b>{sec_u}</b>{ek} ürün özeti:<br>"
+                f"• Satılan adet: <b>{ui.sayi(adet)}</b> ({ui.sayi(sip)} sipariş) · Net ciro: <b>{ui.tl(net)}</b><br>"
+                f"• Liste fiyatı: <b>{ui.sayi(liste_f, 2)} ₺</b> · Ortalama indirim: <b>%{ui.sayi(ind, 1)}</b><br>"
+                f"• Son satış tarihi: <b>{son:%d.%m.%Y}</b>."
+            )
+
+    return None
+
+
+def _cevap_uret(soru: str, bilgi: dict, sayfa: str) -> str:
+    """Soruya sayfa bağlamı, bilgi tabanı ve canlı veri üzerinden yanıt üretir."""
+    s = soru.strip().lower()
+    tum = st.session_state.get("df")
+
+    # 1. Sayfaya özel hızlı eşleşmeler
+    if sayfa == "yonetici":
+        if re.search(r"gelecek ay|30 gün|tahmin|ne olur", s) and bilgi.get("ciro"):
+            return bilgi["ciro"]
+        if re.search(r"aksiyon|en çok getiren|simülasyon|getiri", s) and bilgi.get("indirim"):
+            return bilgi["indirim"]
+    elif sayfa == "pazarlama":
+        if re.search(r"kaybet|yeni müşteri.*kaç|geri dönen|değişti|taban", s) and bilgi.get("kopru"):
+            return bilgi["kopru"]
+        if re.search(r"kalıyor mu|kohort|tekrar sipariş|tutma", s):
+            return "Yeni müşterilerin ilk siparişten sonraki çeyrekte yaklaşık <b>%44'ü</b>, ikinci çeyrekte <b>%53'ü</b> tekrar sipariş veriyor; yani yeni müşterilerin yarısından fazlası ilk çeyrekten sonra sessizleşiyor. İlk 30–45 günde çapraz kategori kuponu önerilir."
+        if re.search(r"gecik|aralık|uzayan", s) and bilgi.get("churn"):
+            return bilgi["churn"]
+        if re.search(r"rfm|davranış|şampiyon", s) and bilgi.get("segment"):
+            return bilgi["segment"]
+    elif sayfa == "tedarik":
+        if re.search(r"8 hafta|talep|tahmin|holt", s) and bilgi.get("kopru"):
+            return bilgi["kopru"]
+        if re.search(r"güvenlik stoğu|sipariş noktası|stok", s) and bilgi.get("indirim"):
+            return bilgi["indirim"]
+        if re.search(r"satışsız|satılmayan|120|hareketsiz|yavaş", s) and bilgi.get("churn"):
+            return bilgi["churn"]
+        if re.search(r"düzensiz|xyz|az\b", s) and bilgi.get("segment"):
+            return bilgi["segment"]
+
+    # 2. Genel bilgi sözlüğü eşleşmeleri
+    if re.search(r"neden düştü|neden değişti|köprü|fark|düşüş|artış", s) and bilgi.get("kopru"):
+        return bilgi["kopru"]
+    if re.search(r"kimi aramalı|churn|risk|bırak|terk|kayıp", s) and bilgi.get("churn"):
+        return bilgi["churn"]
+    if re.search(r"fazla indirim|şüpheli|anomali|norm|indirim", s) and bilgi.get("indirim"):
+        return bilgi["indirim"]
+    if re.search(r"birlikte|sepet|çift|seri", s) and bilgi.get("birlikte"):
+        return bilgi["birlikte"]
+    if re.search(r"pazartesi|haftanın günü|hafta sonu|yoğun", s) and bilgi.get("gun"):
+        return bilgi["gun"]
+    if re.search(r"pareto|segment|a-b-c|80", s) and bilgi.get("segment"):
+        return bilgi["segment"]
+    if re.search(r"kaç satır|temiz|veri kalitesi|bozulmuş|tekrar eden", s):
+        kal = st.session_state.get("kalite") or {}
+        ham = kal.get("ham_satir", 664154)
+        tem = kal.get("temiz_satir", 664133)
+        at = kal.get("atilan", ham - tem)
+        tek = kal.get("tekrar", 6217)
+        return (
+            f"Ham verideki <b>{ui.sayi(ham)}</b> satırdan sıfır/negatif miktar veya fiyatlı <b>{ui.sayi(at)}</b> satır temizlendi; "
+            f"<b>{ui.sayi(tem)}</b> satır (%99,997) kullanıldı. Birebir tekrar eden <b>{ui.sayi(tek)}</b> satır (%0,9) aynı siparişte çift okutma olabileceği için silinmedi."
+        )
+    if re.search(r"maliyet|kâr|brüt", s):
+        return (
+            "Veride ürün alış maliyeti sütunu bulunmuyor. Satış & Fiyat sayfasındaki <b>İndirim planı</b> modülünde alış maliyetini "
+            "liste fiyatın yüzdesi olarak (varsayılan <b>%44</b>) kendin değiştirebilirsin."
+        )
+    if re.search(r"formül|metrik|sözlük|nasıl hesap", s):
+        return (
+            "<b>Temel Formüller:</b><br>"
+            "• <b>Net ciro</b> = Σ (Miktar × Net Fiyat)<br>"
+            "• <b>İndirim oranı</b> = 1 − (Net Ciro / Brüt Ciro)<br>"
+            "• <b>Fazla indirim</b> = Σ (Sipariş İndirimi − Kategori Medyanı) × Brüt Tutar (10+ puan aşanlar)<br>"
+            "• <b>Sipariş noktası</b> = Haftalık Talep × Tedarik Süresi + z × σ × √Süre."
+        )
+
+    # 3. Canlı DataFrame üzerinde varlık (müşteri, il, kategori, ürün) araması
+    canli = _canli_veri_ara(soru, tum)
+    if canli:
+        return canli
+
+    # 4. Ciro genel sorusu
+    if re.search(r"ciro|satış|sipariş|durum|özet", s) and bilgi.get("ciro"):
+        return bilgi["ciro"]
+
+    # 5. Varsayılan yardımcı yanıt
+    return (
+        "Bu soruya özel doğrudan bir eşleşme bulamadım ancak şunları sorabilirsin:<br>"
+        "• <b>Konular:</b> “Ciro neden düştü?”, “İlk kimi aramalı?”, “Fazla indirim ne kadar?”, “Birlikte alınanlar”, “8 hafta talep tahmini”, “Güvenlik stoğu”<br>"
+        "• <b>Canlı veri sorgusu:</b> Bir müşteri kodu (örn. <code>S00172</code>), şehir adı (örn. <code>İstanbul</code>, <code>Ankara</code>), kategori (örn. <code>Polisiye</code>, <code>Sözlük</code>) veya kitap adı (örn. <code>Kral Şakir</code>, <code>Karantina</code>) yazabilirsin!"
+    )
+
+
+def rafbot(bilgi: dict):
+    """Sağ altta yüzen (floating) Ayraç AI · Veriye sor sohbet kutusunu oluşturur."""
+    sayfa = _sayfa_tespit(bilgi)
+    ss = st.session_state
+    ss.setdefault(
+        "rafbot_msgs",
+        [
+            {
+                "role": "assistant",
+                "text": "Merhaba! Ben <b>Ayraç AI</b> 🔖 — RafRadar'ın akıllı kitap &amp; kırtasiye karar asistanıyım. Bu sayfadaki veriler, müşteri kodları (örn. <code>S00172</code>), şehirler, kategoriler veya ürünler hakkında bana soru sorabilir ya da hazır başlıklara tıklayabilirsin.",
+            }
+        ],
+    )
+
+    # Yüzen sağ-alt popover için özel CSS (tüm Streamlit sürümleriyle uyumlu)
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stPopover"] {
+            position: fixed !important;
+            right: 22px !important;
+            bottom: 20px !important;
+            z-index: 999990 !important;
+            width: auto !important;
+        }
+        div[data-testid="stPopover"] > div > button,
+        div[data-testid="stPopover"] button[data-testid="stPopoverButton"] {
+            background: #3d9a84 !important;
+            color: #ffffff !important;
+            border: 2px solid #ffffff !important;
+            border-radius: 999px !important;
+            padding: 10px 18px !important;
+            font-family: 'Poppins', sans-serif !important;
+            font-weight: 600 !important;
+            font-size: 13px !important;
+            box-shadow: 0 8px 24px rgba(31, 42, 68, 0.28) !important;
+            transition: transform 0.15s ease, background 0.15s ease !important;
+        }
+        div[data-testid="stPopover"] > div > button:hover,
+        div[data-testid="stPopover"] button[data-testid="stPopoverButton"]:hover {
+            background: #2f7f6b !important;
+            transform: translateY(-2px) !important;
+        }
+        div[data-testid="stPopover"] > div > button *,
+        div[data-testid="stPopover"] button[data-testid="stPopoverButton"] * {
+            color: #ffffff !important;
+            font-weight: 600 !important;
+        }
+        .rb-header {
+            background: #1f2a44;
+            color: #ffffff;
+            padding: 10px 14px;
+            border-radius: 10px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .rb-title {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 13.5px;
+        }
+        .rb-sub {
+            font-size: 10.5px;
+            color: #cfd6e6;
+        }
+        .rb-msg-bot {
+            background: #f0ebe2;
+            color: #1f2a44;
+            padding: 8px 11px;
+            border-radius: 10px 10px 10px 3px;
+            font-size: 12px;
+            line-height: 1.45;
+            margin: 5px 0;
+        }
+        .rb-msg-user {
+            background: #1f2a44;
+            color: #ffffff;
+            padding: 7px 11px;
+            border-radius: 10px 10px 3px 10px;
+            font-size: 12px;
+            line-height: 1.4;
+            margin: 5px 0 5px auto;
+            max-width: 88%;
+            text-align: right;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.popover("🔖 Ayraç AI · Veriye sor"):
+        st.markdown(
+            "<div class='rb-header'>"
+            "<div><div class='rb-title'>🔖 Ayraç AI · Veriye sor</div>"
+            "<div class='rb-sub'>Kitap &amp; Kırtasiye B2B Akıllı Karar Asistanı</div></div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Hızlı soru çipleri
+        oneriler = HIZLI_SORULAR.get(sayfa, HIZLI_SORULAR["satis"])
+        st.caption("Hızlı sorular (tıkla ve sor):")
+        c_rows = [oneriler[:3], oneriler[3:]]
+        for r_idx, row_chips in enumerate(c_rows):
+            if not row_chips:
+                continue
+            cols = st.columns(len(row_chips))
+            for c_idx, soru_metni in enumerate(row_chips):
+                if cols[c_idx].button(soru_metni, key=f"rb_chip_{sayfa}_{r_idx}_{c_idx}", use_container_width=True):
+                    yanit = _cevap_uret(soru_metni, bilgi, sayfa)
+                    ss["rafbot_msgs"].append({"role": "user", "text": soru_metni})
+                    ss["rafbot_msgs"].append({"role": "assistant", "text": yanit})
+                    st.rerun()
+
+        # Mesaj geçmişi
+        gecmis_kutu = st.container(height=250, border=True)
+        with gecmis_kutu:
+            for m_item in ss["rafbot_msgs"][-14:]:
+                if m_item["role"] == "user":
+                    st.markdown(f"<div class='rb-msg-user'>{m_item['text']}</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div class='rb-msg-bot'>{m_item['text']}</div>", unsafe_allow_html=True)
+
+        # Soru sorma formu
+        with st.form(key=f"rb_form_{sayfa}", clear_on_submit=True, border=False):
+            f1, f2 = st.columns([3.2, 1])
+            girilen = f1.text_input(
+                "Sorunuz",
+                placeholder="Örn: Ciro neden düştü, S00172, İstanbul, Polisiye…",
+                label_visibility="collapsed",
+            )
+            gonder = f2.form_submit_button("Sor", type="primary", use_container_width=True)
+            if gonder and girilen.strip():
+                yanit = _cevap_uret(girilen.strip(), bilgi, sayfa)
+                ss["rafbot_msgs"].append({"role": "user", "text": girilen.strip()})
+                ss["rafbot_msgs"].append({"role": "assistant", "text": yanit})
+                st.rerun()
+
+        alt1, alt2 = st.columns([2, 1])
+        alt1.caption("İpucu: Müşteri kodu, il veya kitap adı da yazabilirsin.")
+        if alt2.button("Temizle", key=f"rb_temizle_{sayfa}", use_container_width=True):
+            ss["rafbot_msgs"] = [ss["rafbot_msgs"][0]]
+            st.rerun()
+
+chat = types.SimpleNamespace(rafbot=rafbot, _cevap_uret=_cevap_uret)
 
 
 # ======================================================================

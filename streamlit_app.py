@@ -1,10 +1,13 @@
 """B2B Karar Destek Sistemi — Tek Dosya Tam Sürüm (streamlit_app.py)
 Tüm veri işleme, analitik modeller, kurumsal kenar çubuğu (sidebar),
-6 departman sayfası ve Ayraç AI (Veriye Sor) sohbet asistanı bu tek dosyada birleştirilmiştir."""
+6 departman sayfası ve Akıllı Asistan (Veriye Sor) sohbet asistanı bu tek dosyada birleştirilmiştir."""
 from __future__ import annotations
 
 import datetime
+import hashlib
+import html as _html
 import io
+import json
 import math
 import re
 import types
@@ -28,6 +31,9 @@ except Exception:
 
 st.set_page_config(page_title="B2B Karar Destek Sistemi", page_icon="📊", layout="wide")
 KOK = Path(__file__).resolve().parent
+VARSAYILAN_VERI = Path.home() / "Downloads" / "B2B_Transaction_Data_.xlsx"  # hazır (varsayılan) veri dosyası
+ONBELLEK = Path.home() / ".cache" / "b2b_karar_destek"  # işlenmiş verinin hızlı okunan parquet kopyası
+ONBELLEK_SURUM = "v2"  # veri hazırlama mantığı değişirse artırılır, eski kopyalar kullanılmaz
 
 
 # ======================================================================
@@ -52,7 +58,11 @@ def _dosya_oku(dosya_adi: str, icerik: bytes) -> pd.DataFrame:
     if ad.endswith(".parquet"):
         return pd.read_parquet(buf)
     if ad.endswith(".xlsx") or ad.endswith(".xls"):
-        return pd.read_excel(buf)
+        try:
+            return pd.read_excel(buf, engine="calamine")  # pip install python-calamine ile 5–10 kat hızlı
+        except Exception:
+            buf.seek(0)
+            return pd.read_excel(buf)
     if ad.endswith(".csv"):
         try:
             return pd.read_csv(buf)
@@ -88,8 +98,7 @@ def _data_hazirla(dosya_adi: str, icerik: bytes) -> tuple[pd.DataFrame | None, i
     for k in kontrol_sutunlari:
         if k in ham.columns:
             s = ham[k]
-            bos_say = int(s.isna().sum() + (s.astype(str).str.strip().isin(["", "nan", "None", "NULL"])).sum() - s.isna().sum())
-            bos[k] = max(0, bos_say)
+            bos[k] = int((s.isna() | s.astype(str).str.strip().isin(["", "nan", "None", "NULL", "NaT", "<NA>"])).sum())
 
     bilimsel = 0
     if "StockCode" in ham.columns:
@@ -102,6 +111,10 @@ def _data_hazirla(dosya_adi: str, icerik: bytes) -> tuple[pd.DataFrame | None, i
         )
 
     tekrar = int(ham.duplicated().sum())
+    q_ham = pd.to_numeric(ham["Quantity"], errors="coerce")
+    np_ham = pd.to_numeric(ham["NetPrice"], errors="coerce").abs()
+    iade_satir = int((q_ham < 0).sum())
+    iade_tutar = float((-q_ham[q_ham < 0] * np_ham[q_ham < 0]).sum()) if iade_satir else 0.0
 
     df = ham.copy()
     df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"], errors="coerce")
@@ -145,17 +158,43 @@ def _data_hazirla(dosya_adi: str, icerik: bytes) -> tuple[pd.DataFrame | None, i
         "temiz_satir": temiz_satir,
         "atilan": atilan,
         "ham_sutun": ham_sutun,
-        "yeni_sutun": 3,
+        "yeni_sutun": 5,
         "bos": bos,
         "bilimsel": bilimsel,
         "tekrar": tekrar,
+        "iade_satir": iade_satir,
+        "iade_tutar": iade_tutar,
     }
     return df, atilan, [], kalite
 
 
+def _hazirla_hizli(dosya_adi: str, icerik: bytes) -> tuple[pd.DataFrame | None, int, list[str], dict]:
+    """_data_hazirla'yı diskte önbellekleyerek çağırır. Aynı dosya (içerik özeti aynı) ikinci kez açıldığında
+    Excel yeniden okunmaz; işlenmiş veri parquet kopyasından ~1 saniyede gelir."""
+    ozet_kod = hashlib.md5(icerik).hexdigest()
+    pq = ONBELLEK / f"{ONBELLEK_SURUM}_{ozet_kod}.parquet"
+    js = pq.with_suffix(".json")
+    if pq.exists() and js.exists():
+        try:
+            meta = json.loads(js.read_text(encoding="utf-8"))
+            return pd.read_parquet(pq), int(meta["atilan"]), [], meta["kalite"]
+        except Exception:
+            pass
+    df, atilan, hatalar, kalite = _data_hazirla(dosya_adi, icerik)
+    if df is not None and not hatalar:
+        try:
+            ONBELLEK.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(pq, index=False)
+            js.write_text(json.dumps({"atilan": int(atilan), "kalite": kalite}, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pq.unlink(missing_ok=True)  # yazılamazsa önbelleksiz devam edilir
+    return df, atilan, hatalar, kalite
+
+
 def _data_ornek_dosyalar() -> list[Path]:
     adaylar = (
-        sorted(KOK.glob("data/*.parquet"))
+        ([VARSAYILAN_VERI] if VARSAYILAN_VERI.exists() else [])
+        + sorted(KOK.glob("data/*.parquet"))
         + sorted(KOK.glob("*.parquet"))
         + sorted(KOK.glob("data/*.xlsx"))
         + sorted(KOK.glob("*.xlsx"))
@@ -175,12 +214,14 @@ def _data_veri() -> pd.DataFrame:
         ornekler = _data_ornek_dosyalar()
         if ornekler:
             f = ornekler[0]
-            df, atilan, hatalar, kalite = _data_hazirla(f.name, f.read_bytes())
+            with st.spinner(f"{f.name} okunuyor… İlk okuma yaklaşık yarım dakika sürer, sonraki açılışlar birkaç saniyedir."):
+                icerik_b = f.read_bytes()
+                df, atilan, hatalar, kalite = _hazirla_hizli(f.name, icerik_b)
             if not hatalar and df is not None:
                 st.session_state["df"] = df
                 st.session_state["atilan"] = atilan
                 st.session_state["kalite"] = kalite
-                st.session_state["dosya_adi"] = f.name
+                st.session_state["dosya_adi"] = f"{f.name}#{hashlib.md5(icerik_b).hexdigest()[:10]}"
     if "df" not in st.session_state:
         st.warning("Önce veri setini yükleyin.")
         st.stop()
@@ -189,7 +230,7 @@ def _data_veri() -> pd.DataFrame:
 
 data = types.SimpleNamespace(
     ZORUNLU=_DATA_ZORUNLU,
-    hazirla=_data_hazirla,
+    hazirla=_hazirla_hizli,
     ornek_dosyalar=_data_ornek_dosyalar,
     veri=_data_veri,
 )
@@ -271,12 +312,11 @@ def kopru(S: dict, C: dict) -> list[float]:
     d1, d0 = float(S["dnet"]), float(C["dnet"])
     if d1 <= 0 or d0 <= 0:
         return [d1 - d0, 0.0, 0.0, 0.0]
-    if abs(d1 - d0) < 1e-6:
-        return [0.0, 0.0, 0.0, 0.0]
 
     f0 = [max(1e-9, C["dord"]), max(1e-9, C["b"]), max(1e-9, C["L"]), max(1e-9, 1.0 - C["disc"])]
     f1 = [max(1e-9, S["dord"]), max(1e-9, S["b"]), max(1e-9, S["L"]), max(1e-9, 1.0 - S["disc"])]
-    l_mean = (d1 - d0) / (np.log(d1) - np.log(d0))
+    # Logaritmik ortalama; d1 = d0 iken limiti d1'dir (dengelenen etkiler de görünür)
+    l_mean = d1 if abs(d1 - d0) < 1e-9 else (d1 - d0) / (np.log(d1) - np.log(d0))
     return [float(l_mean * np.log(a / b)) for a, b in zip(f1, f0)]
 
 
@@ -362,19 +402,20 @@ def birlikte(df: pd.DataFrame, limit: int = 3) -> list[dict]:
     diag = np.diag(co).copy()
     np.fill_diagonal(co, 0)
 
+    n_toplam = max(1, int(df["InvoiceNo"].nunique()))
     ciftler = []
     for i in range(n_u):
         for j in range(i + 1, n_u):
             n_co = int(co[i, j])
-            if n_co >= 3:
-                payda = max(1, min(int(diag[i]), int(diag[j])))
-                ciftler.append({
-                    "a": urunler[i],
-                    "b": urunler[j],
-                    "n": n_co,
-                    "oran": float(n_co / payda),
-                })
-    ciftler.sort(key=lambda x: (-x["n"], -x["oran"]))
+            if n_co < 3:
+                continue
+            # Lift = birlikte görülme / tesadüfen beklenen; 1 ve altı popülerlikten kaynaklanır
+            lift = n_co * n_toplam / max(1, int(diag[i]) * int(diag[j]))
+            if lift <= 1.0:
+                continue
+            payda = max(1, min(int(diag[i]), int(diag[j])))
+            ciftler.append({"a": urunler[i], "b": urunler[j], "n": n_co, "oran": float(n_co / payda), "lift": float(lift)})
+    ciftler.sort(key=lambda x: (-x["n"], -x["lift"]))
     return ciftler[:limit]
 
 
@@ -421,7 +462,8 @@ def musteri_ozeti(tum: pd.DataFrame, mr: pd.DataFrame, pc: pd.DataFrame, max_gun
     out = pc.copy()
     g_mr = mr.groupby("CustomerID").agg(siparis=("InvoiceNo", "nunique"))
     son_tum = tum.groupby("CustomerID")["gun"].max()
-    il_tum = tum.groupby("CustomerID")["City"].first()
+    il_tum = (tum.groupby(["CustomerID", "City"]).size().reset_index(name="n")
+              .sort_values("n").drop_duplicates("CustomerID", keep="last").set_index("CustomerID")["City"])
 
     out["il"] = il_tum.reindex(out.index).fillna("")
     out["siparis"] = g_mr["siparis"].reindex(out.index).fillna(0).astype(int)
@@ -454,11 +496,14 @@ def _musteri_ozellikleri(df_gecmis: pd.DataFrame, ref_gun: pd.Timestamp) -> pd.D
 
 
 def churn_modeli(df: pd.DataFrame) -> tuple[pd.DataFrame, float | None]:
-    """Gradient Boosting ile 30 günlük sipariş vermeme (churn) olasılığını ve beklenen 30 günlük ciroyu hesaplar."""
+    """Gradient Boosting ile 30 günlük sipariş vermeme olasılığını ve beklenen 30 günlük ciroyu hesaplar.
+    Eğitim ve test yalnız referans tarihinden önceki 180 günde sipariş vermiş müşterilerle yapılır;
+    uzun süredir pasif müşteriler 'kolay pozitif' olarak AUC'yi şişirmesin diye dışarıda tutulur."""
     max_gun = df["gun"].max()
     min_gun = df["gun"].min()
     oz_son = _musteri_ozellikleri(df, max_gun)
     cols = ["rec", "sip", "gun_say", "net", "adet", "kat", "aralik", "gecikme_orani", "sepet", "net30", "net90"]
+    AKTIF = 180
 
     auc = None
     model = None
@@ -466,68 +511,89 @@ def churn_modeli(df: pd.DataFrame) -> tuple[pd.DataFrame, float | None]:
         t_kes = max_gun - pd.Timedelta(days=30)
         t_val = max_gun - pd.Timedelta(days=60)
         df_egit = df[df["gun"] <= t_val]
-        df_hedef_egit = df[(df["gun"] > t_val) & (df["gun"] <= t_kes)]
         df_test = df[df["gun"] <= t_kes]
-        df_hedef_test = df[df["gun"] > t_kes]
-
         if not df_egit.empty and not df_test.empty:
             x_tr = _musteri_ozellikleri(df_egit, t_val)
-            aktif_tr = set(df_hedef_egit["CustomerID"].unique())
+            x_tr = x_tr[x_tr["rec"] <= AKTIF]
+            aktif_tr = set(df[(df["gun"] > t_val) & (df["gun"] <= t_kes)]["CustomerID"].unique())
             y_tr = (~x_tr.index.isin(aktif_tr)).astype(int)
 
             x_te = _musteri_ozellikleri(df_test, t_kes)
-            aktif_te = set(df_hedef_test["CustomerID"].unique())
+            x_te = x_te[x_te["rec"] <= AKTIF]
+            aktif_te = set(df[df["gun"] > t_kes]["CustomerID"].unique())
             y_te = (~x_te.index.isin(aktif_te)).astype(int)
 
             if len(np.unique(y_tr)) == 2 and len(np.unique(y_te)) == 2:
                 clf = GradientBoostingClassifier(n_estimators=80, max_depth=3, learning_rate=0.07, random_state=42)
                 clf.fit(x_tr[cols], y_tr)
-                p_te = clf.predict_proba(x_te[cols])[:, 1]
-                auc = float(roc_auc_score(y_te, p_te))
-                # Tüm etiketli geçmişle (t_kes) yeniden eğit
-                clf.fit(x_te[cols], y_te)
+                auc = float(roc_auc_score(y_te, clf.predict_proba(x_te[cols])[:, 1]))
+                clf.fit(x_te[cols], y_te)  # en güncel etiketli pencereyle yeniden eğit
                 model = clf
 
     if model is not None:
         p = model.predict_proba(oz_son[cols])[:, 1]
+        # 180+ gündür pasif müşteriler modelin kapsamı dışında; pratikte kayıp sayılır
+        p = np.where(oz_son["rec"] > AKTIF, np.maximum(p, 0.95), p)
     else:
-        # Yedek analitik lojistik skor
         z = (oz_son["rec"] - 35.0) / 25.0 + 0.4 * np.clip(oz_son["gecikme_orani"] - 1.0, -2.0, 4.0) - 0.15 * np.log1p(oz_son["sip"])
         p = 1.0 / (1.0 + np.exp(-z))
 
     risk = pd.Series(np.where(p >= 0.70, "Yüksek", np.where(p >= 0.40, "Orta", "Düşük")), index=oz_son.index)
-    toplam_gun = max(30.0, float((max_gun - min_gun).days + 1))
-    m30 = np.maximum(oz_son["net90"] / 3.0, oz_son["net"] * (30.0 / toplam_gun))
+    # Beklenen 30 günlük ciro: yakın dönem (son 90 gün) ve uzun dönem aylık ortalamasının ortalaması
+    # (eski max() iyimser yanlıydı)
+    sure = np.maximum(30.0, (max_gun - oz_son["ilk"]).dt.days.astype(float) + 1.0)
+    yakin = oz_son["net90"] / np.clip(np.minimum(sure, 90.0) / 30.0, 1.0, 3.0)
+    uzun = oz_son["net"] * 30.0 / sure
+    m30 = (yakin + uzun) / 2.0
 
     out = pd.DataFrame({"p": p, "risk": risk, "m30": m30}, index=oz_son.index)
     return out, auc
 
 
-def supheli(tum: pd.DataFrame, mr: pd.DataFrame, tur: str = "indirim") -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Kategori medyanından sapan şüpheli sipariş-kategori satırlarını döndürür."""
-    if mr.empty:
-        bos = pd.DataFrame(columns=["InvoiceNo", "Category", "musteri", "q", "g", "n", "indirim", "md", "sapma", "fazla", "mq", "qr"])
-        return bos, bos
-
-    baz_df = tum.dropna(subset=["Category"])
-    baz_oc = baz_df.groupby(["InvoiceNo", "Category"], as_index=False).agg(
-        q=("Quantity", "sum"),
-        g=("gross", "sum"),
-        n=("net", "sum"),
-    )
-    baz_oc["indirim"] = np.where(baz_oc["g"] > 0, 1.0 - baz_oc["n"] / baz_oc["g"], 0.0)
-    kat_med = baz_oc.groupby("Category").agg(md=("indirim", "median"), mq=("q", "median"))
-
-    oc = mr.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
+def _siparis_kategori(df: pd.DataFrame) -> pd.DataFrame:
+    oc = df.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
         musteri=("CustomerID", "first"),
         q=("Quantity", "sum"),
         g=("gross", "sum"),
         n=("net", "sum"),
     )
     oc["indirim"] = np.where(oc["g"] > 0, 1.0 - oc["n"] / oc["g"], 0.0)
-    oc = oc.merge(kat_med, on="Category", how="left")
-    oc["md"] = oc["md"].fillna(0.38)
-    oc["mq"] = oc["mq"].fillna(10.0).replace(0, 1.0)
+    return oc
+
+
+def _hacim_dilimi(oc: pd.DataFrame, kenar: dict) -> np.ndarray:
+    dilim = np.zeros(len(oc), dtype=int)
+    q = oc["q"].to_numpy()
+    for kat, idx in oc.groupby("Category").indices.items():
+        if kat in kenar:
+            dilim[idx] = np.searchsorted(kenar[kat], q[idx], side="right")
+    return dilim
+
+
+def _norm_ekle(tum: pd.DataFrame, oc: pd.DataFrame) -> pd.DataFrame:
+    """Sipariş-kategori satırlarına indirim normunu (md) ekler: aynı kategori VE benzer büyüklükteki
+    (kategori içi adet çeyreği) siparişlerin ortanca indirimi. B2B'de büyük siparişe verilen hacim
+    indirimi meşru olduğundan sipariş büyüklüğü kontrol edilir."""
+    baz = _siparis_kategori(tum)
+    kenar = {k: np.quantile(s.to_numpy(), [0.25, 0.5, 0.75]) for k, s in baz.groupby("Category")["q"]}
+    baz["dilim"] = _hacim_dilimi(baz, kenar)
+    oc = oc.copy()
+    oc["dilim"] = _hacim_dilimi(oc, kenar)
+    md = baz.groupby(["Category", "dilim"])["indirim"].median().rename("md")
+    oc = oc.join(md, on=["Category", "dilim"])
+    oc["md"] = oc["md"].fillna(oc["Category"].map(baz.groupby("Category")["indirim"].median()))
+    oc["md"] = oc["md"].fillna(float(baz["indirim"].median()) if len(baz) else 0.0)
+    oc["mq"] = oc["Category"].map(baz.groupby("Category")["q"].median()).fillna(10.0).replace(0, 1.0)
+    return oc
+
+
+def supheli(tum: pd.DataFrame, mr: pd.DataFrame, tur: str = "indirim") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Normdan (kategori × sipariş büyüklüğü medyanı) sapan şüpheli sipariş-kategori satırlarını döndürür."""
+    if mr.empty:
+        bos = pd.DataFrame(columns=["InvoiceNo", "Category", "musteri", "q", "g", "n", "indirim", "md", "sapma", "fazla", "mq", "qr"])
+        return bos, bos
+
+    oc = _norm_ekle(tum, _siparis_kategori(mr))
     oc["sapma"] = oc["indirim"] - oc["md"]
     oc["fazla"] = np.where(oc["sapma"] > 0, oc["sapma"] * oc["g"], 0.0)
     oc["qr"] = oc["q"] / oc["mq"]
@@ -569,30 +635,60 @@ def _m_avg8(wk: np.ndarray, h: int = 8) -> list[float]:
     return [max(0.0, v)] * h
 
 
+def _holt_uydur(y: np.ndarray, alpha: float, beta: float, phi: float) -> tuple[float, float, float]:
+    lvl, trd, sse = float(y[0]), float(y[1] - y[0]), 0.0
+    for v in y[1:]:
+        sse += (float(v) - (lvl + phi * trd)) ** 2
+        onceki = lvl
+        lvl = alpha * float(v) + (1.0 - alpha) * (lvl + phi * trd)
+        trd = beta * (lvl - onceki) + (1.0 - beta) * phi * trd
+    return lvl, trd, sse
+
+
 def _m_holt(wk: np.ndarray, h: int = 8) -> list[float]:
-    if len(wk) == 0:
+    """Sönümlü trend (Gardner & McKenzie 1985); α, β, φ bir adımlık hata kareleri toplamına göre ızgarada seçilir."""
+    y = np.asarray(wk, dtype=float)
+    if len(y) == 0:
         return [0.0] * h
-    if len(wk) == 1:
-        return [max(0.0, float(wk[0]))] * h
-    alpha, beta, phi = 0.35, 0.15, 0.85
-    lvl = float(wk[0])
-    trd = float(wk[1] - wk[0])
-    for y in wk[1:]:
-        prev_lvl = lvl
-        lvl = alpha * float(y) + (1.0 - alpha) * (lvl + phi * trd)
-        trd = beta * (lvl - prev_lvl) + (1.0 - beta) * phi * trd
-    out = []
-    phi_sum = 0.0
+    if len(y) < 4:
+        return [max(0.0, float(y[-1]))] * h
+    en = None
+    for alpha in (0.1, 0.2, 0.35, 0.5):
+        for beta in (0.05, 0.15):
+            for phi in (0.8, 0.9, 0.98):
+                lvl, trd, sse = _holt_uydur(y, alpha, beta, phi)
+                if en is None or sse < en[0]:
+                    en = (sse, lvl, trd, phi)
+    _, lvl, trd, phi = en
+    out, phi_sum = [], 0.0
     for k in range(1, h + 1):
         phi_sum += phi ** k
         out.append(max(0.0, lvl + phi_sum * trd))
     return out
 
 
+def _m_sba(wk: np.ndarray, h: int = 8, alpha: float = 0.1) -> list[float]:
+    """Aralıklı talep için Croston yönteminin Syntetos-Boylan (2005) düzeltmeli hali."""
+    y = np.asarray(wk, dtype=float)
+    nz = np.flatnonzero(y > 0)
+    if len(nz) == 0:
+        return [0.0] * h
+    z, p, q = float(y[nz[0]]), float(nz[0] + 1), 1
+    for t in range(nz[0] + 1, len(y)):
+        if y[t] > 0:
+            z += alpha * (float(y[t]) - z)
+            p += alpha * (q - p)
+            q = 1
+        else:
+            q += 1
+    return [max(0.0, (1 - alpha / 2) * z / max(p, 1.0))] * h
+
+
 MODELLER = [
     ("Son 4 hafta ortalaması", _m_avg4),
     ("Son 8 hafta ortalaması", _m_avg8),
-    ("Trend (Holt)", _m_holt),
+    ("Sönümlü trend (Holt)", _m_holt),
+    ("Aralıklı talep (Croston-SBA)", _m_sba),
 ]
 
 POLITIKA = {
@@ -648,53 +744,45 @@ def seg_of(R: int, FM: int) -> int:
     return 5  # Uykuda / Kayıp
 
 
-def baz_tahmin30(m: pd.DataFrame) -> tuple[float, float]:
-    """Önümüzdeki 30 gün için baz ciro tahmini ve geriye dönük test WAPE hatasını döndürür."""
+def baz_tahmin30(m: pd.DataFrame, bitis=None) -> tuple[float, float, float]:
+    """Önümüzdeki 30 gün için baz ciro tahmini, geriye dönük 4 haftalık WAPE ve %80 tahmin aralığı (göreli yarı genişlik).
+    Seri, filtrelenmiş verinin son satışında değil verinin bitiş tarihinde (bitis) biter; aradaki satışsız günler sıfırdır."""
     if m.empty:
-        return 0.0, 0.25
-    min_g, max_g = m["gun"].min(), m["gun"].max()
+        return 0.0, 0.25, 0.25
+    min_g = m["gun"].min()
+    max_g = max(m["gun"].max(), pd.Timestamp(bitis)) if bitis is not None else m["gun"].max()
     gunluk = m.groupby("gun")["net"].sum().reindex(pd.date_range(min_g, max_g), fill_value=0.0).values
     n_haf = len(gunluk) // 7
     if n_haf < 8:
         ort_gun = float(np.mean(gunluk)) if len(gunluk) else 0.0
-        return ort_gun * 30.0, 0.25
+        return ort_gun * 30.0, 0.25, 0.25
 
-    wk = gunluk[: n_haf * 7].reshape(-1, 7).sum(axis=1)
+    wk = gunluk[len(gunluk) - n_haf * 7:].reshape(-1, 7).sum(axis=1)  # en yeni günler korunur
     sonuc, en = geri_test(wk)
     best = sonuc[en]
     f5 = best["f"](wk, 5)
     baz = float(sum(f5[:4]) + f5[4] * (2.0 / 7.0))
-    wape = float(np.clip(best["wape"], 0.08, 0.45))
-    return baz, wape
+    wape = float(best["wape"])
+    # %80 aralık: haftalık tahmin hatası sapması × √(30/7), hatalar bağımsız varsayılır
+    bant = float(np.clip(1.2816 * best["sd"] * np.sqrt(30.0 / 7.0) / baz, 0.05, 0.8)) if baz > 0 else 0.25
+    return baz, wape, bant
 
 
 def norm_asimi(tum: pd.DataFrame, m: pd.DataFrame | None = None) -> tuple[dict, pd.DataFrame]:
-    """Kategori medyan indirimini 10+ puan aşan siparişleri ve kategori kırılımını hesaplar."""
+    """İndirimi normu (kategori × sipariş büyüklüğü medyanı) 10+ puan aşan siparişleri ve kategori kırılımını hesaplar."""
     hedef = m if m is not None else tum
     if hedef.empty:
         bos = pd.DataFrame(columns=["md", "asan", "pay", "fazla"])
         return {"asan_siparis": 0, "toplam": 1, "fazla": 0.0, "tavan": 0.0}, bos
 
-    baz_oc = tum.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
-        g=("gross", "sum"),
-        n=("net", "sum"),
-    )
-    baz_oc["disc"] = np.where(baz_oc["g"] > 0, 1.0 - baz_oc["n"] / baz_oc["g"], 0.0)
-    kat_md = baz_oc.groupby("Category")["disc"].median()
-
-    oc = hedef.dropna(subset=["Category"]).groupby(["InvoiceNo", "Category"], as_index=False).agg(
-        g=("gross", "sum"),
-        n=("net", "sum"),
-    )
-    oc["disc"] = np.where(oc["g"] > 0, 1.0 - oc["n"] / oc["g"], 0.0)
-    oc["md"] = oc["Category"].map(kat_md).fillna(0.38)
-    oc["sapma"] = oc["disc"] - oc["md"]
+    oc = _norm_ekle(tum, _siparis_kategori(hedef))
+    oc["sapma"] = oc["indirim"] - oc["md"]
     oc["asan"] = oc["sapma"] > 0.10
     oc["fazla"] = np.where(oc["asan"], oc["sapma"] * oc["g"], 0.0)
     oc["tavan"] = np.where(oc["sapma"] > 0.05, (oc["sapma"] - 0.05) * oc["g"], 0.0)
 
     kat_ozet = oc.groupby("Category").agg(
-        md=("md", "first"),
+        md=("md", "median"),
         asan=("asan", "sum"),
         toplam=("InvoiceNo", "count"),
         fazla=("fazla", "sum"),
@@ -713,7 +801,11 @@ def norm_asimi(tum: pd.DataFrame, m: pd.DataFrame | None = None) -> tuple[dict, 
 
 
 def abc_xyz(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
-    """Ürünleri satılan adede göre ABC ve aylık talep oynaklığına (CV) göre XYZ olarak sınıflandırır."""
+    """Ürünleri satılan adede göre (hacim bazlı) ABC ve aylık talep oynaklığına (CV) göre XYZ olarak sınıflandırır.
+    CV yalnız ürünün ilk satış ayından itibaren hesaplanır, yarım kalan son ay dışarıda bırakılır,
+    farklı yılların aynı ayları birleştirilmez; 3 aydan kısa geçmişi olan ürün Z (yetersiz geçmiş) sayılır."""
+    import warnings
+
     if df.empty:
         bos = pd.Series(dtype=float)
         return bos, bos, pd.Series(dtype=str), pd.Series(dtype=str)
@@ -724,14 +816,26 @@ def abc_xyz(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series, pd.Serie
     onceki = kum.shift(1, fill_value=0.0)
     abc = pd.Series(np.where(onceki < 0.80, "A", np.where(onceki < 0.95, "B", "C")), index=qadet.index)
 
-    ay_mat = (
-        df.assign(ay=df["gun"].dt.month)
+    donem = df["gun"].dt.to_period("M")
+    aylar = pd.period_range(donem.min(), donem.max(), freq="M")
+    son = df["gun"].max()
+    if len(aylar) > 1 and son.day < son.days_in_month:
+        aylar = aylar[:-1]
+    mat = (
+        df.assign(ay=donem)
         .pivot_table(index="Description", columns="ay", values="Quantity", aggfunc="sum", fill_value=0.0)
-        .reindex(index=qadet.index, columns=range(1, 13), fill_value=0.0)
+        .reindex(index=qadet.index, columns=aylar, fill_value=0.0)
+        .to_numpy(dtype=float)
     )
-    ort = ay_mat.mean(axis=1).replace(0, np.nan)
-    std = ay_mat.std(axis=1, ddof=0)
-    cv = (std / ort).fillna(2.0)
+    ilk = df.groupby("Description")["gun"].min().dt.to_period("M").reindex(qadet.index)
+    ilk_idx = np.asarray(aylar.searchsorted(pd.PeriodIndex(ilk)))
+    aktif = np.arange(len(aylar))[None, :] >= ilk_idx[:, None]
+    deger = np.where(aktif, mat, np.nan)
+    n_ay = aktif.sum(axis=1)
+    with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+        warnings.simplefilter("ignore", RuntimeWarning)
+        cv = np.nanstd(deger, axis=1) / np.nanmean(deger, axis=1)
+    cv = np.where((n_ay >= 3) & np.isfinite(cv), cv, 2.0)
     xyz = pd.Series(np.where(cv <= 0.50, "X", np.where(cv <= 1.00, "Y", "Z")), index=qadet.index)
     return qadet, kum, abc, xyz
 
@@ -760,6 +864,23 @@ def yavas_urunler(m: pd.DataFrame, bitis: str) -> pd.DataFrame:
     return df_y[["q90", "pr", "d"]]
 
 
+ESNEKLIK = -2.2  # fiyat esnekliği varsayımı (Bijmolt, van Heerde & Pieters 2005 meta-analiz ortalamasına yakın)
+
+
+def paket_etkisi(yavas: pd.DataFrame, ek_puan: float) -> tuple[float, float]:
+    """Yavaş ürünlere 'ek_puan' kadar ek indirim verildiğinde 30 günlük net ciro ve adet değişimi.
+    Sabit esneklikli talep: Q1 = Q0 · (P1/P0)^ε → net ciro farkı = Q0·P0·((P1/P0)^(1+ε) − 1).
+    Mevcut adede verilen ek indirimin kaybı (kanibalizasyon) bu farkın içindedir."""
+    if yavas.empty or ek_puan <= 0:
+        return 0.0, 0.0
+    d = yavas["d"]
+    oran = (1 - d - ek_puan / 100) / (1 - d)  # yeni net fiyat / eski net fiyat
+    net0 = yavas["q90"] * yavas["pr"] * (1 - d)  # 90 günlük mevcut net ciro
+    ciro = float((net0 * (oran ** (1 + ESNEKLIK) - 1)).sum()) / 3
+    adet = float((yavas["q90"] * (oran ** ESNEKLIK - 1)).sum()) / 3
+    return ciro, adet
+
+
 def musteri_degisim(tum: pd.DataFrame, m: pd.DataFrame, a, b, ca, cb) -> dict:
     """Seçili dönem ve karşılaştırma dönemi arasındaki aktif, yeni, geri dönen ve kaybedilen müşterileri hesaplar."""
     s_df = an.araliga_kes(m, a, b)
@@ -783,7 +904,7 @@ def musteri_degisim(tum: pd.DataFrame, m: pd.DataFrame, a, b, ca, cb) -> dict:
         "aS": len(set_s),
         "aC": len(set_c),
         "nw": nw,
-        "nwC": max(1, nwC) if len(set_c) and nwC == 0 else nwC,
+        "nwC": nwC,
         "bk": bk,
         "ls": ls,
         "ct": ct,
@@ -800,41 +921,46 @@ def aylik(m: pd.DataFrame, yil: int) -> pd.DataFrame | None:
 
 
 def kohort_ceyrek(m: pd.DataFrame) -> tuple[list, dict]:
-    """Çeyreklik müşteri kohort elde tutma (retention) tablosunu ve ortalamalarını hesaplar."""
+    """Çeyreklik kohort elde tutma tablosu. Kohort = müşterinin verideki İLK siparişinin çeyreği.
+    Verinin başladığı çeyrekteki kohort sol-sansürlüdür (o tarihte zaten müşteri olanları içerir):
+    etiketine * eklenir ve ortalamalara katılmaz."""
     if m.empty:
         return [], {1: None, 2: None, 3: None}
 
     yil = int(m["gun"].dt.year.mode().iloc[0])
+    ilk = m.groupby("CustomerID")["gun"].min()
+    ilk = ilk[ilk.dt.year == yil]
     d = m[m["gun"].dt.year == yil]
-    if d.empty:
+    if d.empty or ilk.empty:
         return [], {1: None, 2: None, 3: None}
 
-    d_q = d.assign(q=d["gun"].dt.quarter)
-    mevcut_q = sorted(d_q["q"].unique().tolist())
-    max_q = max(mevcut_q)
-    ilk_q = d_q.groupby("CustomerID")["q"].min()
-    aktif_q = d_q.groupby(["CustomerID", "q"]).size().unstack(fill_value=0) > 0
+    ilk_q = ilk.dt.quarter
+    aktif_q = d.assign(q=d["gun"].dt.quarter).groupby(["CustomerID", "q"]).size().unstack(fill_value=0) > 0
+    max_q = int(d["gun"].dt.quarter.max())
+    veri_bas = m["gun"].min()
+    sansur_q = int(veri_bas.quarter) if veri_bas.year == yil else 0
 
     ks = []
     top_pay = {1: 0, 2: 0, 3: 0}
     top_payda = {1: 0, 2: 0, 3: 0}
-
     for q0 in range(1, 5):
         cids = ilk_q[ilk_q == q0].index
         n = len(cids)
         if n == 0:
             continue
+        sansur = q0 == sansur_q
         yuz = []
         for k in (1, 2, 3):
             qk = q0 + k
             if qk <= max_q and qk in aktif_q.columns:
                 tutulan = int(aktif_q.loc[cids, qk].sum())
                 yuz.append(float(tutulan / n * 100.0))
-                top_pay[k] += tutulan
-                top_payda[k] += n
+                if not sansur:
+                    top_pay[k] += tutulan
+                    top_payda[k] += n
             else:
                 yuz.append(None)
-        ks.append((f"{yil} Ç{q0}", n, yuz))
+        ks.append((f"{yil} Ç{q0}" + (" *" if sansur else ""), n, yuz))
 
     kg = {k: (float(top_pay[k] / top_payda[k] * 100.0) if top_payda[k] > 0 else None) for k in (1, 2, 3)}
     return ks, kg
@@ -847,7 +973,8 @@ def rfm(tum: pd.DataFrame, m: pd.DataFrame, a, b) -> tuple[pd.DataFrame, pd.Inde
     onceden_all = m[m["gun"] < ta]["CustomerID"].unique()
 
     if mr.empty:
-        bos = pd.DataFrame(columns=["son", "sip", "net", "rec", "R", "FM", "seg"])
+        bos = pd.DataFrame({"son": pd.Series(dtype="datetime64[ns]"), "net": pd.Series(dtype=float),
+                            **{c: pd.Series(dtype=int) for c in ["sip", "rec", "R", "FM", "seg"]}})
         return bos, pd.Index(onceden_all)
 
     g = mr.groupby("CustomerID").agg(
@@ -859,15 +986,18 @@ def rfm(tum: pd.DataFrame, m: pd.DataFrame, a, b) -> tuple[pd.DataFrame, pd.Inde
 
     n = len(g)
     if n >= 5:
-        r_score = pd.qcut(g["rec"].rank(method="first", ascending=False), 5, labels=[1, 2, 3, 4, 5]).astype(int)
-        f_score = pd.qcut(g["sip"].rank(method="first", ascending=True), 5, labels=[1, 2, 3, 4, 5]).astype(int)
-        m_score = pd.qcut(g["net"].rank(method="first", ascending=True), 5, labels=[1, 2, 3, 4, 5]).astype(int)
+        # Eşit değerler aynı puanı alır: ortalama yüzdelik sıra 5 dilime bölünür
+        def _puan(s):
+            return np.ceil(s.rank(method="average", pct=True) * 5).clip(1, 5).astype(int)
+        r_score = _puan(-g["rec"])
+        f_score = _puan(g["sip"])
+        m_score = _puan(g["net"])
     else:
         r_score = pd.Series(3, index=g.index)
         f_score = pd.Series(3, index=g.index)
         m_score = pd.Series(3, index=g.index)
 
-    fm_score = np.clip(np.round((f_score + m_score) / 2.0), 1, 5).astype(int)
+    fm_score = np.clip(np.floor((f_score + m_score) / 2.0 + 0.5), 1, 5).astype(int)  # yarımlar yukarı
     g["R"] = r_score
     g["FM"] = fm_score
     g["seg"] = [seg_of(int(r), int(fm)) for r, fm in zip(g["R"], g["FM"])]
@@ -949,7 +1079,7 @@ def haftalik(tum: pd.DataFrame, urun: str) -> tuple[np.ndarray, np.ndarray]:
     u_df = tum[tum["Description"] == urun]
     gunluk = u_df.groupby("gun")["Quantity"].sum().reindex(idx, fill_value=0.0).values.astype(float)
     n_haf = len(gunluk) // 7
-    wk = gunluk[: n_haf * 7].reshape(-1, 7).sum(axis=1)
+    wk = gunluk[len(gunluk) - n_haf * 7:].reshape(-1, 7).sum(axis=1)  # en eski eksik hafta atılır
     return wk, gunluk
 
 
@@ -957,7 +1087,7 @@ def geri_test(wk: np.ndarray) -> tuple[list[dict], int]:
     """Son 12 haftada 3 tahmin modelini geriye dönük test eder ve en düşük WAPE'li modeli seçer."""
     n = len(wk)
     test_len = min(12, max(4, n // 3))
-    bas = n - test_len
+    bas = max(1, n - test_len)  # çok kısa seride negatif indeks olmasın
 
     sonuc = []
     for ad, fn in MODELLER:
@@ -995,11 +1125,12 @@ def _z_degeri(sl: int) -> float:
     return tablo.get(int(sl), 1.645)
 
 
-def stok(wk: np.ndarray, gunluk: np.ndarray, lt: int, sl: int) -> dict:
-    """Güvenlik stoğu, sipariş noktası ve son 26 haftalık günlük stok simülasyonunu hesaplar."""
+def stok(wk: np.ndarray, gunluk: np.ndarray, lt: int, sl: int, sd_hata: float | None = None, mu_tahmin: float | None = None) -> dict:
+    """Güvenlik stoğu, sipariş noktası ve son 26 haftalık günlük stok simülasyonunu hesaplar.
+    Tahmin varsa σ = haftalık tahmin hatasının sapması (sd_hata), μ = haftalık tahmin (mu_tahmin)."""
     son_wk = wk[-26:] if len(wk) >= 26 else wk
-    mu = float(np.mean(son_wk)) if len(son_wk) else 0.0
-    sd = float(np.std(son_wk, ddof=0)) if len(son_wk) else 0.0
+    mu = float(mu_tahmin) if mu_tahmin is not None else (float(np.mean(son_wk)) if len(son_wk) else 0.0)
+    sd = float(sd_hata) if sd_hata is not None else (float(np.std(son_wk, ddof=0)) if len(son_wk) else 0.0)
     z = _z_degeri(sl)
 
     ss = float(z * sd * np.sqrt(lt))
@@ -1066,6 +1197,14 @@ def mevsimsellik(tum: pd.DataFrame) -> tuple[list[str], list[list[int]], int]:
         .pivot_table(index="Category", columns="ay", values="Quantity", aggfunc="sum", fill_value=0.0)
         .reindex(index=cats, columns=range(1, 13), fill_value=0.0)
     )
+    # Kısmi aylar (verinin ilk ve son ayı) gün sayısına göre tam aya ölçeklenir
+    bas_g, son_g = d["gun"].min(), d["gun"].max()
+    olcek = pd.Series(1.0, index=range(1, 13))
+    if son_g.day < son_g.days_in_month:
+        olcek[son_g.month] *= son_g.days_in_month / son_g.day
+    if bas_g.day > 1:
+        olcek[bas_g.month] *= bas_g.days_in_month / (bas_g.days_in_month - bas_g.day + 1)
+    piv = piv.mul(olcek, axis=1)
     ort = piv.mean(axis=1).replace(0, 1.0)
     endeks = piv.div(ort, axis=0) * 100.0
     sm = [[int(round(v)) for v in endeks.loc[c].values] for c in cats]
@@ -1111,6 +1250,8 @@ an2 = types.SimpleNamespace(
     stok=stok,
     mevsimsellik=mevsimsellik,
     satissiz=satissiz,
+    paket_etkisi=paket_etkisi,
+    ESNEKLIK=ESNEKLIK,
 )
 
 
@@ -1208,24 +1349,24 @@ def _inject_css(aktif_sayfa: str = ""):
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
         <style>
-        :root, html, body, .stApp {{
-            color-scheme: light !important;
-            --bg: #f6f3ee;
-            --fg: #1f2a44;
-            --muted: #5b6475;
-            --card: #ffffff;
-            --side: #faf7f2;
-            --line: #e4dfd6;
-            --green: #3d9a84;
-            --amber: #e0a526;
-            --red: #d0574f;
-            --orange: #d9622b;
-            --blue: #3b6fd1;
-            --primary-color: #3d9a84;
-            --background-color: #f6f3ee;
-            --secondary-background-color: #faf7f2;
-            --text-color: #1f2a44;
+        :root {{
+            --bg: #f6f3ee; --card: #ffffff; --side: #faf7f2; --line: #e4dfd6; --track: #f0ebe2; --soft: #eaf4f0;
+            --zebra: #fcfaf6; --hover: #f3eee5; --plot: #fceef1; --fg: #1f2a44; --fg2: #3a4357; --muted: #5b6475; --vurgu: #14513f;
         }}
+        html[data-tema="dark"] {{
+            color-scheme: dark;
+            --bg: #121826; --card: #1a2234; --side: #161d2c; --line: #2c3549; --track: #252e41; --soft: #183a33;
+            --zebra: #1e2638; --hover: #263046; --plot: #1b2232; --fg: #e6e9f0; --fg2: #c8cedb; --muted: #9aa3b5; --vurgu: #7fd1b9;
+        }}
+        html[data-tema="dark"] .num {{ background: #3d9a84; }}
+        html[data-tema="dark"] .rb-msg-user {{ background: #2f7f6b !important; }}
+        html[data-tema="dark"] [data-testid="stPlotlyChart"] .main-svg text {{ fill: #dfe3ec !important; }}
+        html[data-tema="dark"] [data-testid="stPlotlyChart"] .gridlayer path,
+        html[data-tema="dark"] [data-testid="stPlotlyChart"] .zerolinelayer path {{ stroke: #2e3850 !important; }}
+        html[data-tema="dark"] [data-testid="stPlotlyChart"] .cartesianlayer [style*="stroke: rgb(31, 42, 68)"],
+        html[data-tema="dark"] [data-testid="stPlotlyChart"] .shapelayer [style*="stroke: rgb(31, 42, 68)"] {{ stroke: #dfe3ec !important; }}
+        html[data-tema="dark"] [data-testid="stPlotlyChart"] .cartesianlayer [style*="fill: rgb(31, 42, 68)"] {{ fill: #dfe3ec !important; }}
+        section[data-testid="stSidebar"] [data-testid="stElementContainer"]:has([data-testid="stHtml"]) {{ display: none !important; }}
         .stApp {{
             background-color: var(--bg) !important;
             color: var(--fg) !important;
@@ -1253,8 +1394,8 @@ def _inject_css(aktif_sayfa: str = ""):
             max-width: 1440px !important;
         }}
         section[data-testid="stSidebar"] {{
-            background-color: #faf7f2 !important;
-            border-right: 1px solid #e4dfd6 !important;
+            background-color: var(--side) !important;
+            border-right: 1px solid var(--line) !important;
             min-width: 295px !important;
             max-width: 310px !important;
         }}
@@ -1273,7 +1414,7 @@ def _inject_css(aktif_sayfa: str = ""):
             border-radius: 9px !important;
             border: 1px solid transparent !important;
             background: transparent !important;
-            color: #1f2a44 !important;
+            color: var(--fg) !important;
             font-family: 'Inter', sans-serif !important;
             font-size: 14.5px !important;
             font-weight: 500 !important;
@@ -1291,14 +1432,14 @@ def _inject_css(aktif_sayfa: str = ""):
             background: rgba(31, 42, 68, 0.06) !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {{
-            background: #ffffff !important;
+            background: var(--card) !important;
             font-weight: 600 !important;
-            border: 1px solid #e4dfd6 !important;
+            border: 1px solid var(--line) !important;
             box-shadow: inset 4px 0 0 {aktif_renk} !important;
         }}
         section[data-testid="stSidebar"] div.stButton > button p {{
             font-size: 14.5px !important;
-            color: #1f2a44 !important;
+            color: var(--fg) !important;
             margin: 0 !important;
             line-height: 1.3 !important;
             text-align: left !important;
@@ -1314,19 +1455,19 @@ def _inject_css(aktif_sayfa: str = ""):
         div[data-baseweb="popover"],
         ul[data-baseweb="menu"],
         li[role="option"] {{
-            background-color: #ffffff !important;
-            color: #1f2a44 !important;
+            background-color: var(--card) !important;
+            color: var(--fg) !important;
         }}
         div[data-baseweb="select"] span,
         div[data-baseweb="select"] div,
         div[data-baseweb="input"] input {{
-            color: #1f2a44 !important;
+            color: var(--fg) !important;
         }}
         /* Sol menü selectbox ve date_input kutularını HTML tasarımla eşitle */
         section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
         section[data-testid="stSidebar"] div[data-baseweb="input"] > div {{
-            background-color: #ffffff !important;
-            border: 1px solid #cfc9bd !important;
+            background-color: var(--card) !important;
+            border: 1px solid var(--line) !important;
             border-radius: 8px !important;
             font-size: 12px !important;
             min-height: 34px !important;
@@ -1343,7 +1484,7 @@ def _inject_css(aktif_sayfa: str = ""):
             padding: 2px 0px !important;
             letter-spacing: -0.04em !important;
             text-align: center !important;
-            color: #1f2a44 !important;
+            color: var(--fg) !important;
             font-weight: 500 !important;
             width: 100% !important;
             min-width: 0 !important;
@@ -1358,33 +1499,33 @@ def _inject_css(aktif_sayfa: str = ""):
         }}
         section[data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {{
             font-size: 12px !important;
-            color: #5b6475 !important;
+            color: var(--muted) !important;
             font-weight: 400 !important;
         }}
         .rr-side-hdr {{
             font-size: 11px;
             font-weight: 600;
-            color: #5b6475;
+            color: var(--muted);
             letter-spacing: 0.06em;
             text-transform: uppercase;
             margin: 10px 0 4px 0;
         }}
         div[data-testid="stVerticalBlockBorderWrapper"] {{
-            background-color: #ffffff !important;
-            border: 1px solid #e4dfd6 !important;
+            background-color: var(--card) !important;
+            border: 1px solid var(--line) !important;
             border-radius: 12px !important;
             padding: 14px 16px !important;
             box-shadow: 0 1px 2px rgba(31, 42, 68, 0.02);
         }}
         [data-testid="stPlotlyChart"] {{
-            background-color: #fceef1 !important;
+            background-color: var(--plot) !important;
             border-radius: 10px !important;
             padding: 4px !important;
             overflow: hidden !important;
         }}
         h1, h2, h3, .h {{
             font-family: 'Poppins', sans-serif !important;
-            color: #1f2a44;
+            color: var(--fg);
         }}
         .rr-page-header {{
             margin-bottom: 10px;
@@ -1395,13 +1536,13 @@ def _inject_css(aktif_sayfa: str = ""):
             margin: 0 !important;
             padding: 0 !important;
             line-height: 1.2 !important;
-            color: #1f2a44 !important;
+            color: var(--fg) !important;
         }}
         .rr-page-header p {{
             margin: 4px 0 0 0 !important;
             font-size: 14px !important;
             font-style: italic;
-            color: #5b6475 !important;
+            color: var(--muted) !important;
         }}
         .h {{
             font-weight: 600;
@@ -1409,11 +1550,11 @@ def _inject_css(aktif_sayfa: str = ""):
             margin: 0;
             display: flex;
             align-items: center;
-            color: #1f2a44;
+            color: var(--fg);
         }}
         .sub {{
             font-size: 12px;
-            color: #5b6475;
+            color: var(--muted);
             margin: 2px 0 6px 0;
             line-height: 1.4;
         }}
@@ -1432,8 +1573,8 @@ def _inject_css(aktif_sayfa: str = ""):
             flex-shrink: 0;
         }}
         .card {{
-            background: #ffffff;
-            border: 1px solid #e4dfd6;
+            background: var(--card);
+            border: 1px solid var(--line);
             border-radius: 12px;
             padding: 15px 17px;
             box-sizing: border-box;
@@ -1453,8 +1594,8 @@ def _inject_css(aktif_sayfa: str = ""):
             }}
         }}
         .kpi {{
-            background: #ffffff;
-            border: 1px solid #e4dfd6;
+            background: var(--card);
+            border: 1px solid var(--line);
             border-top: 4px solid #3d9a84;
             border-radius: 12px;
             padding: 12px 14px;
@@ -1465,24 +1606,24 @@ def _inject_css(aktif_sayfa: str = ""):
         }}
         .kl {{
             font-size: 12px;
-            color: #5b6475;
+            color: var(--muted);
         }}
         .kv {{
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
             font-size: 21px;
             margin: 2px 0;
-            color: #1f2a44;
+            color: var(--fg);
         }}
         .kv2 {{
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
             font-size: 15px;
             margin: 2px 0;
-            color: #1f2a44;
+            color: var(--fg);
         }}
         .rule {{
-            border-top: 1px dashed #d9d3c7;
+            border-top: 1px dashed var(--line);
             margin: 8px 0 6px 0;
         }}
         .chg {{
@@ -1495,7 +1636,7 @@ def _inject_css(aktif_sayfa: str = ""):
         }}
         .pos {{ background: #d6ece5; color: #14513f; }}
         .neg {{ background: #fbe3e0; color: #8f2a24; }}
-        .mute {{ background: #f0ebe2; color: #5b6475; }}
+        .mute {{ background: var(--track); color: var(--muted); }}
         .neu {{ background: #e4e7ee; color: #2b3550; }}
         .pill {{
             display: inline-block;
@@ -1503,8 +1644,8 @@ def _inject_css(aktif_sayfa: str = ""):
             font-weight: 500;
             padding: 3px 9px;
             border-radius: 999px;
-            background: #f0ebe2;
-            color: #1f2a44;
+            background: var(--track);
+            color: var(--fg);
             margin: 2px 4px 2px 0;
         }}
         .pill.g {{ background: #d6ece5; color: #14513f; }}
@@ -1513,17 +1654,17 @@ def _inject_css(aktif_sayfa: str = ""):
         .out {{
             border-radius: 10px;
             padding: 9px 11px;
-            background: #eaf4f0;
+            background: var(--soft);
         }}
         .out .t {{
             font-size: 11px;
-            color: #5b6475;
+            color: var(--muted);
         }}
         .out .v {{
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
             font-size: 16px;
-            color: #1f2a44;
+            color: var(--fg);
         }}
         table.t {{
             width: 100%;
@@ -1533,15 +1674,15 @@ def _inject_css(aktif_sayfa: str = ""):
         }}
         table.t th, table.t td {{
             padding: 7px 8px;
-            border-bottom: 1px solid #ece7dd;
+            border-bottom: 1px solid var(--line);
             text-align: left;
             vertical-align: middle;
         }}
         table.t th {{
             font-size: 11px;
-            color: #5b6475;
+            color: var(--muted);
             font-weight: 600;
-            background: #faf7f2;
+            background: var(--side);
         }}
         table.t td.r, table.t th.r {{
             text-align: right;
@@ -1552,12 +1693,12 @@ def _inject_css(aktif_sayfa: str = ""):
             font-size: 12px;
             font-weight: 500;
             padding: 7px 4px;
-            border: 2px solid #fff;
+            border: 2px solid var(--card);
             border-radius: 4px;
         }}
         .hm th {{
             font-size: 11px;
-            color: #5b6475;
+            color: var(--muted);
             padding: 4px;
             text-align: center;
             background: none;
@@ -1573,7 +1714,7 @@ def _inject_css(aktif_sayfa: str = ""):
             margin: 4px 0;
         }}
         ol.lst small {{
-            color: #5b6475;
+            color: var(--muted);
         }}
         .info {{
             display: inline-flex;
@@ -1582,8 +1723,8 @@ def _inject_css(aktif_sayfa: str = ""):
             width: 15px;
             height: 15px;
             border-radius: 50%;
-            background: #e4dfd6;
-            color: #1f2a44;
+            background: var(--line);
+            color: var(--fg);
             font-size: 10px;
             font-weight: 700;
             font-style: normal;
@@ -1613,13 +1754,62 @@ def _inject_css(aktif_sayfa: str = ""):
             z-index: 9999;
             pointer-events: none;
         }}
+        /* ---- Okunabilirlik katmanı: daha büyük punto, net hiyerarşi, okunaklı tablolar ---- */
+        .stApp {{ font-size: 15px; line-height: 1.55; -webkit-font-smoothing: antialiased; }}
+        .rr-page-header h1 {{ font-size: 30px !important; letter-spacing: -0.015em; }}
+        .rr-page-header p {{ font-size: 15px !important; }}
+        .rr-page-header .rr-not {{ font-size: 12.5px; font-style: italic; color: var(--muted); line-height: 1.5; margin-top: 6px; max-width: 980px; }}
+        [data-testid="stPlotlyChart"] {{ padding: 0 !important; }}
+        .h {{ font-size: 16.5px; }}
+        .num {{ width: 24px; height: 24px; font-size: 12px; }}
+        .sub {{ font-size: 13.5px; line-height: 1.5; margin: 3px 0 10px 0; }}
+        .kl {{ font-size: 13px; }}
+        .kv {{ font-size: 24px; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }}
+        .kv2 {{ font-size: 16.5px; font-variant-numeric: tabular-nums; }}
+        .chg {{ font-size: 12px; padding: 2px 8px; }}
+        .pill {{ font-size: 12.5px; padding: 4px 10px; }}
+        .out .t {{ font-size: 12.5px; line-height: 1.4; }}
+        .out .v {{ font-size: 19px; font-variant-numeric: tabular-nums; }}
+        table.t {{ font-size: 13.5px; font-variant-numeric: tabular-nums; }}
+        table.t th, table.t td {{ padding: 9px 10px; line-height: 1.45; }}
+        table.t th {{ font-size: 12.5px; color: var(--fg2); border-bottom: 2px solid var(--line); }}
+        table.t tbody tr:nth-child(even) {{ background: var(--zebra); }}
+        table.t tbody tr:hover {{ background: var(--hover); }}
+        .hm td {{ font-size: 13px; padding: 8px 5px; }}
+        .hm th {{ font-size: 12px; }}
+        ol.lst {{ font-size: 13.5px; line-height: 1.55; }}
+        .info:hover::after {{ font-size: 12px; }}
+        [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{ font-size: 13px !important; color: var(--muted) !important; line-height: 1.5 !important; }}
+        section[data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {{ font-size: 13px !important; }}
+        section[data-testid="stSidebar"] [data-testid="stDateInput"] input {{ font-size: 12.5px !important; letter-spacing: 0 !important; }}
+        section[data-testid="stSidebar"] div[data-baseweb="select"] > div {{ font-size: 13px !important; }}
+        div .rb-msg-bot, div .rb-msg-user {{ font-size: 13.5px; line-height: 1.5; }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def baslik(title: str, sub: str = ""):
+_TEMA_JS = """<span></span><script>
+(function () {
+  if (window.__temaIzle) return; window.__temaIzle = true;
+  var bekliyor = false;
+  function uygula() {
+    bekliyor = false;
+    var app = document.querySelector('.stApp') || document.querySelector('[data-testid="stApp"]');
+    if (!app) return;
+    var koyu = (getComputedStyle(app).colorScheme || '').indexOf('dark') >= 0;
+    var hedef = koyu ? 'dark' : 'light';
+    if (document.documentElement.dataset.tema !== hedef) document.documentElement.dataset.tema = hedef;
+  }
+  uygula();
+  new MutationObserver(function () { if (!bekliyor) { bekliyor = true; requestAnimationFrame(uygula); } })
+    .observe(document.body, {attributes: true, subtree: true, attributeFilter: ['class']});
+})();
+</script>"""
+
+
+def baslik(title: str, sub: str = "", not_metni: str = ""):
     """Sayfa üst başlığını ve global CSS'i basar."""
     eslesme = {
         "Yönetici Özeti": "yonetici",
@@ -1632,13 +1822,15 @@ def baslik(title: str, sub: str = ""):
     aktif = eslesme.get(title, "")
     st.session_state["_aktif_sayfa"] = aktif
     _inject_css(aktif)
+    with st.sidebar:
+        st.html(_TEMA_JS, unsafe_allow_javascript=True)
     if aktif == "yukle":
         st.markdown(
             "<style>section[data-testid='stSidebar']{display:none !important;}</style>",
             unsafe_allow_html=True,
         )
     st.markdown(
-        f"<div class='rr-page-header'><h1>{title}</h1><p>{sub}</p></div>",
+        f"<div class='rr-page-header'><h1>{title}</h1><p>{sub}</p>" + (f"<div class='rr-not'>{not_metni}</div>" if not_metni else "") + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -1653,17 +1845,18 @@ def bolum(num: int, title: str, sub: str = ""):
 
 
 def _preset_dates(preset: str, min_d: datetime.date, max_d: datetime.date, ref_a: datetime.date = None, ref_b: datetime.date = None):
+    """Hazır aralıklar verinin son gününe (max_d) göre hesaplanır; sabit yıl/ay varsayımı yoktur."""
     y = max_d.year
     if preset == "Geçtiğimiz yıl":
-        a, b = datetime.date(y, 1, 1), datetime.date(y, 12, 31)
+        a, b = datetime.date(y, 1, 1), max_d
     elif preset == "Geçtiğimiz ay":
-        a, b = datetime.date(y, 12, 1), datetime.date(y, 12, 31)
+        a, b = max_d.replace(day=1), max_d
     elif preset == "Son çeyrek":
-        a, b = datetime.date(y, 10, 1), datetime.date(y, 12, 31)
+        a, b = datetime.date(y, 3 * ((max_d.month - 1) // 3) + 1, 1), max_d
     elif preset == "İlk yarıyıl":
         a, b = datetime.date(y, 1, 1), datetime.date(y, 6, 30)
     elif preset == "Son yarıyıl":
-        a, b = datetime.date(y, 7, 1), datetime.date(y, 12, 31)
+        a, b = (datetime.date(y, 7, 1) if max_d.month > 6 else datetime.date(y, 1, 1)), max_d
     elif preset == "Önceki dönem" and ref_a is not None and ref_b is not None:
         uzunluk = max(1, (ref_b - ref_a).days + 1)
         b = max(min_d, ref_a - datetime.timedelta(days=1))
@@ -1684,10 +1877,12 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
     min_d = tum["gun"].min().date()
     max_d = tum["gun"].max().date()
 
-    def_a = max(min_d, min(max_d, datetime.date(2020, 11, 1)))
-    def_b = max(min_d, min(max_d, datetime.date(2020, 12, 14)))
-    def_ca = max(min_d, min(max_d, datetime.date(2020, 9, 1)))
-    def_cb = max(min_d, min(max_d, datetime.date(2020, 10, 31)))
+    # Varsayılan: verinin son ayı ve bir önceki ay; karşılaştırma: ondan önceki iki ay (veriye göre hesaplanır)
+    gun1 = datetime.timedelta(days=1)
+    def_b = max_d
+    def_a = max(min_d, (max_d.replace(day=1) - gun1).replace(day=1))
+    def_cb = max(min_d, def_a - gun1)
+    def_ca = max(min_d, (def_cb.replace(day=1) - gun1).replace(day=1))
 
     ss = st.session_state
     ss.setdefault("a", def_a)
@@ -1704,7 +1899,7 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
         # 1. KURUMSAL LOGO & BAŞLIK
         st.markdown(
             """
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e4dfd6">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--line)">
                 <div style="width:34px;height:34px;border-radius:9px;background:#1f2a44;display:flex;align-items:center;justify-content:center;flex-shrink:0">
                     <svg width="20" height="20" viewBox="0 0 28 26" aria-hidden="true">
                         <rect x="2" y="10" width="6" height="14" rx="1.5" fill="#ffffff"/>
@@ -1713,8 +1908,8 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
                     </svg>
                 </div>
                 <div style="line-height:1.2">
-                    <div style="font-family:Poppins,sans-serif;font-weight:700;font-size:15.5px;color:#1f2a44;letter-spacing:-0.01em">B2B Karar Destek</div>
-                    <div style="font-size:11px;color:#5b6475;font-weight:500">Kurumsal İş Zekâsı Paneli</div>
+                    <div style="font-family:Poppins,sans-serif;font-weight:700;font-size:15.5px;color:var(--fg);letter-spacing:-0.01em">B2B Karar Destek</div>
+                    <div style="font-size:11px;color:var(--muted);font-weight:500">Kurumsal İş Zekâsı Paneli</div>
                 </div>
             </div>
             """,
@@ -1745,7 +1940,7 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
                 f"{picon}  {pname}",
                 key=f"sb_nav_{pid}",
                 type="primary" if aktif_mi else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 if not aktif_mi:
                     _sayfa_degistir(pid)
@@ -1763,7 +1958,7 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
             if pa and pb:
                 ss["a"], ss["b"] = pa, pb
             a, b = ss["a"], ss["b"]
-            st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:#5b6475'>{tarih_etiketi(a, b)}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:var(--muted)'>{tarih_etiketi(a, b)}</div>", unsafe_allow_html=True)
         else:
             c1, c2 = st.columns(2)
             a = c1.date_input("Başlangıç", value=ss["a"], min_value=min_d, max_value=max_d, format="DD.MM.YYYY", key="inp_a", label_visibility="collapsed")
@@ -1782,7 +1977,7 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
             if pca and pcb:
                 ss["ca"], ss["cb"] = pca, pcb
             ca, cb = ss["ca"], ss["cb"]
-            st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:#5b6475'>{tarih_etiketi(ca, cb)}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='margin:-6px 0 6px 2px;font-size:11px;color:var(--muted)'>{tarih_etiketi(ca, cb)}</div>", unsafe_allow_html=True)
         else:
             cc1, cc2 = st.columns(2)
             ca = cc1.date_input("Karş. başlangıç", value=ss["ca"], min_value=min_d, max_value=max_d, format="DD.MM.YYYY", key="inp_ca", label_visibility="collapsed")
@@ -1804,13 +1999,13 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
         f_sehir = st.selectbox("Şehir", sehirler, index=sehirler.index(ss["f_sehir"]) if ss["f_sehir"] in sehirler else 0, key="f_sehir")
 
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-        if st.button("Filtreleri sıfırla", key="sb_reset_btn", use_container_width=True):
+        if st.button("Filtreleri sıfırla", key="sb_reset_btn", width="stretch"):
             for k in ("a", "b", "ca", "cb", "f_kat", "f_urun", "f_sehir", "f_hazir", "f_kars", "inp_a", "inp_b", "inp_ca", "inp_cb"):
                 ss.pop(k, None)
             st.rerun()
 
-        st.markdown("<div style='border-top:1px dashed #cfc9bd;margin:10px 0 6px'></div>", unsafe_allow_html=True)
-        if st.button("📂 İlk açılış ekranı (veri yükle)", key="sb_yukle_btn", use_container_width=True):
+        st.markdown("<div style='border-top:1px dashed var(--line);margin:10px 0 6px'></div>", unsafe_allow_html=True)
+        if st.button("📂 İlk açılış ekranı (veri yükle)", key="sb_yukle_btn", width="stretch"):
             _sayfa_degistir("yukle")
 
     m = tum
@@ -1825,16 +2020,24 @@ def filtreler(tum: pd.DataFrame) -> tuple[pd.DataFrame, datetime.date, datetime.
 
 
 def plot(fig):
-    """Plotly grafiğini açık toz pembe (#fceef1) arka plan ve kurumsal temayla basar."""
+    """Plotly grafiğini kurumsal temayla, okunaklı punto ve Türkçe sayı ayraçlarıyla basar."""
     fig.update_layout(
-        font=dict(family="Inter, system-ui, sans-serif", color="#1f2a44", size=11),
-        paper_bgcolor="#fceef1",
-        plot_bgcolor="#fceef1",
-        hoverlabel=dict(bgcolor="#1f2a44", font_color="white", font_family="Inter, sans-serif", font_size=12),
+        font=dict(family="Inter, system-ui, sans-serif", color="#1f2a44", size=13),
+        paper_bgcolor="rgba(0,0,0,0)",  # zemin rengi kapsayıcıdan gelir (açık/koyu temaya göre)
+        plot_bgcolor="rgba(0,0,0,0)",
+        separators=",.",
+        hoverlabel=dict(bgcolor="#1f2a44", font_color="white", font_family="Inter, sans-serif", font_size=13),
+        legend=dict(font=dict(size=12.5)),
     )
-    fig.update_xaxes(gridcolor="#f3dce1")
-    fig.update_yaxes(gridcolor="#f3dce1")
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    eksen = dict(gridcolor="#f1d8de", tickfont=dict(size=12.5), title_font=dict(size=13), automargin=True, zerolinecolor="#d9b9c1")
+    fig.update_xaxes(**eksen)
+    fig.update_yaxes(**eksen)
+    fig.update_annotations(font_size=12.5)
+    fig.update_traces(textfont_size=13, selector=dict(type="bar"))
+    mg = fig.layout.margin
+    sag_eksen = bool(fig.layout.to_plotly_json().get("yaxis2", {}).get("overlaying"))
+    fig.update_layout(margin=dict(l=max(mg.l or 0, 8), r=max(mg.r or 0, 52 if sag_eksen else 12), t=max(mg.t or 0, 10), b=max(mg.b or 0, 34)))
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 def xlsx(df: pd.DataFrame, sheet_name: str = "Veri") -> bytes:
@@ -1921,7 +2124,7 @@ def ust_bilgi(S: dict, C: dict, a, b, ca, cb) -> str:
     return (
         f"<div style='margin:4px 0 6px'>"
         f"<span class='pill g'>Seçili: {et(a, b)} · {S['gun']} gün</span>"
-        f"<span style='font-size:12px;color:#5b6475;margin:0 4px'>karşılaştırma</span>"
+        f"<span style='font-size:12px;color:var(--muted);margin:0 4px'>karşılaştırma</span>"
         f"<span class='pill'>{et(ca, cb)} · {C['gun']} gün</span>"
         f"<span class='pill y'>{not_txt}</span>"
         f"</div>"
@@ -1950,7 +2153,7 @@ def not_kutusu(txt: str):
 
 def vurgu(txt: str):
     st.markdown(
-        f"<div style='font-size:13px;font-weight:600;color:#1f2a44;margin:4px 0 8px'>{txt}</div>",
+        f"<div style='font-size:13px;font-weight:600;color:var(--fg);margin:4px 0 8px'>{txt}</div>",
         unsafe_allow_html=True,
     )
 
@@ -1992,7 +2195,7 @@ def sapma_tablo(rows: list[str], cols: list[str], mat: list[list[int]]) -> str:
     th = "<th></th>" + "".join(f"<th>{c}</th>" for c in cols)
     trs = []
     for r_lbl, r_vals in zip(rows, mat):
-        tds = [f"<td style='text-align:left;font-weight:600;background:#faf7f2;color:#1f2a44'>{r_lbl}</td>"]
+        tds = [f"<td style='text-align:left;font-weight:600;background:var(--side);color:var(--fg)'>{r_lbl}</td>"]
         for v in r_vals:
             if v >= 100:
                 t = min(1.0, (v - 100) / 80.0)
@@ -2029,292 +2232,626 @@ w = types.SimpleNamespace(
 
 
 # ======================================================================
-# 6. AYRAÇ AI — YÜZEN SOHBET ASİSTANI (chat)
+# 6. AKILLI ASİSTAN — YÜZEN SOHBET ASİSTANI (chat)
 # ======================================================================
 
 
-def _sayfa_tespit(bilgi: dict) -> str:
-    """Bilgi sözlüğündeki ipuçlarından aktif sayfayı tahmin eder."""
-    c = str(bilgi.get("ciro") or "")
-    k = str(bilgi.get("kopru") or "")
-    ind = str(bilgi.get("indirim") or "")
-    if "baz tahmin" in c or "aksiyon" in ind:
-        return "yonetici"
-    if "en iyi yöntem" in k or "tedarik süresi" in ind:
-        return "tedarik"
-    if "geri dönen" in k or "Şampiyonlar" in c:
-        return "pazarlama"
-    if "ham " in c or "temizlendi" in c or "atılan" in c:
-        return "kalite"
-    return "satis"
-
-
 HIZLI_SORULAR = {
-    "yonetici": [
-        "Gelecek ay ne olur?",
-        "En çok getiren aksiyon",
-        "İlk kimi aramalı?",
-        "Ciro neden değişti?",
-        "En büyük 5 müşteri kim?",
-    ],
-    "satis": [
-        "Ciro neden düştü?",
-        "İlk kimi aramalı?",
-        "Fazla indirim ne kadar?",
-        "Birlikte alınanlar",
-        "Pazartesi yoğunluğu",
-    ],
-    "pazarlama": [
-        "Kaç müşteri kaybettik?",
-        "Yeni müşteri kalıyor mu?",
-        "Geciken müşteriler",
-        "En çok satan il hangisi?",
-        "RFM segmentleri",
-    ],
-    "tedarik": [
-        "8 hafta talep tahmini",
-        "Güvenlik stoğu ne kadar?",
-        "Satışsız ürünler",
-        "Düzensiz ürünler (AZ)",
-        "Hangi ay hangi kategori güçlü?",
-    ],
-    "kalite": [
-        "Kaç satır temizlendi?",
-        "Fazla indirim ne kadar?",
-        "Maliyet verisi var mı?",
-        "Tekrar eden satırlar",
-        "Metrik formülleri",
-    ],
+    "yonetici": ["Gelecek ay ne olur?", "En çok getiren aksiyon", "İlk kimi aramalı?", "Ciro neden değişti?", "En büyük 5 müşteri kim?"],
+    "satis": ["Ciro neden düştü?", "Fazla indirim ne kadar?", "Birlikte alınanlar", "En çok satan 5 ürün", "Pazartesi yoğunluğu"],
+    "pazarlama": ["Kaç müşteri kaybettik?", "Yeni müşteri kalıyor mu?", "Geciken müşteriler", "En çok satan il hangisi?", "RFM segmentleri"],
+    "tedarik": ["8 hafta talep tahmini", "Güvenlik stoğu ne kadar?", "Satışsız ürünler", "Düzensiz ürünler (XYZ)", "Hangi ay hangi kategori güçlü?"],
+    "kalite": ["Kaç satır temizlendi?", "Fazla indirim ne kadar?", "Maliyet verisi var mı?", "Tekrar eden satırlar", "Metrik formülleri"],
 }
+
+SAYFA_AD = {"yonetici": "Yönetici Özeti", "satis": "Satış & Fiyat", "pazarlama": "Pazarlama & Müşteri", "tedarik": "Tedarik Zinciri", "kalite": "Veri Kalitesi"}
+
+# Sayfaların gönderdiği 'bilgi' anahtarları sayfaya göre farklı içerik taşır; burada anlamlı adlara çevrilir.
+_BILGI_ESLEME = {
+    "yonetici": {"ciro": "tahmin", "indirim": "aksiyon", "kopru": "degisim", "churn": "churn", "segment": "portfoy", "gun": "gun"},
+    "satis": {"ciro": "ozet", "kopru": "degisim", "churn": "churn", "segment": "portfoy", "indirim": "fazla_indirim", "birlikte": "birlikte", "gun": "gun"},
+    "pazarlama": {"ciro": "ozet", "segment": "rfm", "churn": "gecikme", "kopru": "musteri_tabani", "birlikte": "birlikte", "kohort": "kohort"},
+    "tedarik": {"ciro": "ozet", "indirim": "stok", "churn": "satissiz", "kopru": "tahmin", "segment": "xyz", "mevsim": "mevsim"},
+    "kalite": {"ciro": "kalite", "indirim": "fazla_indirim"},
+}
+_KONU_SAYFA = {"aksiyon": "yonetici", "stok": "tedarik"}
+
+# (konu, kökler, ifadeler). Kök: kelimenin başı eşleşir; "=" ile başlayan veya 3 harften kısa kökler tam eşleşir.
+_KONULAR = [
+    ("kalite", ("temizl", "kalite", "bozuk", "eksik", "satır"), ("kaç satır", "tekrar eden", "veri kalitesi")),
+    ("formul", ("formül", "metrik", "sözlük", "tanım"), ("nasıl hesap",)),
+    ("maliyet", ("maliyet", "=kâr", "=kar", "kârlılık", "marj"), ()),
+    ("kohort", ("kohort", "kalıyor", "kalıcı", "sadakat", "retention", "tekrar"), ("kalıyor mu", "elde tutma", "tekrar sipariş", "tekrar alım")),
+    ("musteri_tabani", ("kaybet", "kaybed", "kaybedil", "=kayıp", "kayıplar", "=yeni", "dönen", "kazanıl"), ("yeni müşteri", "geri dönen", "müşteri tabanı", "kaç müşteri")),
+    ("churn", ("churn", "aramalı", "=ara", "bırak", "terk", "riskli", "=risk"), ("kimi ara", "bırakma riski")),
+    ("gecikme", ("gecik", "uzayan"), ("sipariş aralığı",)),
+    ("tahmin", ("tahmin", "gelecek", "önümüzdeki", "öngörü", "projeksiyon", "talep"), ("ne olur", "gelecek ay", "30 gün", "8 hafta")),
+    ("satissiz", ("satışsız", "satılmayan", "satılmamış", "hareketsiz", "=ölü"), ("uzun süredir satıl",)),
+    ("stok", ("stok", "stoğ", "güvenlik"), ("sipariş noktası",)),
+    ("xyz", ("xyz", "düzensiz", "dalgalı", "oynak"), ()),
+    ("rfm", ("rfm", "şampiyon", "davranış", "=sadık", "uykuda", "segment"), ()),
+    ("portfoy", ("pareto", "portföy", "=abc", "segment"), ("a b c", "80 20")),
+    ("aksiyon", ("aksiyon", "yapmalı", "getiren", "simülasyon", "=plan", "öneri"), ("en çok getiren", "ne yapmalı")),
+    ("fazla_indirim", ("şüpheli", "anomali", "=norm", "normun", "aşan"), ("fazla indirim", "normun üst")),
+    ("indirim", ("indirim", "iskonto"), ()),
+    ("birlikte", ("birlikte", "çapraz", "=çift", "çiftler"), ("birlikte alın", "sepet analiz")),
+    ("gun", ("=pazartesi", "=salı", "=çarşamba", "=perşembe", "=cuma", "=cumartesi", "=pazar", "yoğun", "günü", "günler"), ("haftanın gün", "hafta sonu")),
+    ("mevsim", ("mevsim", "sezon", "güçlü", "zayıf"), ()),
+    ("aylik", ("aylık", "trend"), ("ay ay", "aylara göre")),
+    ("degisim", ("neden", "düştü", "düşüş", "arttı", "artış", "değişti", "değişim", "köprü", "=fark"), ()),
+    ("ozet", ("ciro", "özet", "durum", "performans", "gidiyor", "satış"), ("nasıl gidiyor",)),
+    ("yardim", ("yardım", "merhaba", "selam", "sorabilir"), ("ne sorabilirim",)),
+]
+_KONU_SIRA = {k[0]: i for i, k in enumerate(_KONULAR)}
+
+# Sıralama soruları: "en çok satan il", "en büyük 10 müşteri", "hangi kategori"...
+_SIRA_KEL = {"en", "top", "ilk", "lider", "hangi", "hangisi", "hangileri", "kim", "kimler", "kimdir"}
+_BOYUT = [
+    ("City", ("=il", "iller", "ilde", "ilden", "=ilin", "şehir"), "il"),
+    ("Category", ("kategori", "=tür", "türü", "türler", "=grup"), "kategori"),
+    ("ay", ("=ay", "aylar", "=ayı", "ayda"), "ay"),
+    ("dow", ("=gün", "günü", "günler"), "gün"),
+    ("CustomerID", ("müşteri", "bayi", "=cari", "kimler", "=kim"), "müşteri"),
+    ("Description", ("ürün", "kitap", "=eser", "=sku", "satan", "best"), "ürün"),
+]
+_AYLAR_N = ["ocak", "şubat", "mart", "nisan", "mayıs", "haziran", "temmuz", "ağustos", "eylül", "ekim", "kasım", "aralık"]
+_GUN_AD = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+_DURAK = {
+    "nedir", "nasıl", "kadar", "hangi", "hangisi", "neden", "niçin", "kimler", "için", "olan", "daha", "fazla", "ürün", "ürünü",
+    "ürünler", "kitap", "kitabı", "satış", "satışı", "sipariş", "ciro", "cirosu", "indirim", "stok", "durum", "durumu", "özet",
+    "bilgi", "göster", "söyle", "misin", "musun", "bana", "acaba", "toplam", "oranı", "tane", "adet", "olarak", "gibi", "veya",
+    "hakkında", "ilgili", "verir", "nelerdir", "satan", "satılan",
+}
+
+_FORMUL = (
+    "<b>Temel formüller</b><br>"
+    "• <b>Net ciro</b> = Σ (miktar × net fiyat)<br>"
+    "• <b>İndirim oranı</b> = 1 − net ciro ÷ brüt ciro<br>"
+    "• <b>Fazla indirim</b> = Σ (sipariş indirimi − norm) × brüt tutar; norm = aynı kategori ve benzer sipariş büyüklüğündeki siparişlerin ortanca indirimi (10+ puan aşanlar)<br>"
+    "• <b>Güvenlik stoğu</b> = z × haftalık tahmin hatası sapması × √tedarik süresi; <b>sipariş noktası</b> = haftalık tahmin × süre + güvenlik stoğu<br>"
+    "• <b>Ciro köprüsü</b> = günlük ciro farkının LMDI ile sipariş sayısı, sepet adedi, liste fiyatı ve indirime bölünmesi"
+)
+_MALIYET = (
+    "Veride ürün alış maliyeti sütunu yok. Satış & Fiyat sayfasındaki <b>İndirim planı</b> modülünde alış maliyetini "
+    "liste fiyatının yüzdesi olarak (varsayılan <b>%44</b>) kendin girebilirsin."
+)
+
+
+def _yardim() -> str:
+    return (
+        "Soruyu kendi cümlenle yazabilirsin; kelimelere ayırıp konu, yer, kategori, ay ve sayı bilgisini çıkarıyorum. Örnekler:<br>"
+        "• <b>Sıralama:</b> “en büyük 10 müşteri”, “İzmir'de en çok satan 5 ürün”, “en çok indirim alan kategori”, “en düşük cirolu il”<br>"
+        "• <b>Özet:</b> bir müşteri kodu (<code>S00172</code>), il (<code>Ankara</code>), kategori ya da kitap adı; “kasım ayında ciro”<br>"
+        "• <b>Analiz:</b> “ciro neden düştü?”, “kimi aramalı?”, “fazla indirim ne kadar?”, “yeni müşteri kalıyor mu?”, “satışsız ürünler”, “gelecek ay tahmini”<br>"
+        "Cevaplar soldaki tarih ve filtreleri kullanır; tüm veri için “tüm yıl” yaz."
+    )
 
 
 def _tr_norm(s: str) -> str:
     """Türkçe karakter duyarlı küçük harf dönüşümü (İ -> i, I -> ı)."""
-    return (
-        str(s)
-        .replace("İ", "i")
-        .replace("I", "ı")
-        .lower()
-        .replace("i\u0307", "i")
-    )
+    return str(s).replace("İ", "i").replace("I", "ı").lower().replace("i̇", "i")
 
 
-def _canli_veri_ara(soru: str, tum: pd.DataFrame) -> str | None:
-    """Kullanıcının sorusunda geçen müşteri kodu, il, kategori veya ürün adını canlı veride arar."""
-    if tum is None or tum.empty:
-        return None
+_KATLA = str.maketrans("ıöüşğçâîû", "iousgcaiu")
 
-    q_raw = soru.strip()
-    q_low = _tr_norm(q_raw)
 
-    # 1. Müşteri kodu sorgusu (örn. S00172, A00023, C00105 vb.)
-    m_kod = re.search(r"\b([A-Za-z]\d{4,6})\b", q_raw)
+def _katla(s: str) -> str:
+    return _tr_norm(s).translate(_KATLA)
+
+
+def _kel(s: str) -> list[str]:
+    return re.findall(r"\w+", _katla(s))
+
+
+def _e(x) -> str:
+    return _html.escape(str(x))
+
+
+def _kisa(x, n: int = 46) -> str:
+    x = str(x)
+    return _e(x if len(x) <= n else x[:n] + "…")
+
+
+def _eslesir(tok: str, kok: str) -> bool:
+    tam = kok.startswith("=")
+    kok = _katla(kok.lstrip("="))
+    if tam or len(kok) <= 3:
+        return tok == kok
+    return tok.startswith(kok)
+
+
+def _var_mi(kel: list[str], kokler) -> bool:
+    return any(_eslesir(t, k) for t in kel for k in kokler)
+
+
+@st.cache_data(show_spinner=False)
+def _sozluk(_tum: pd.DataFrame, vid) -> tuple[dict, dict, list]:
+    iller = {_katla(x): x for x in _tum["City"].dropna().unique() if str(x).strip() and x != "Belirsiz"}
+    katlar = {_katla(x): x for x in _tum["Category"].dropna().unique()}
+    urunler = [(_katla(d), d) for d in _tum["Description"].dropna().unique()]
+    return iller, katlar, urunler
+
+
+def _varliklar(soru: str, kel: list[str], tum: pd.DataFrame, vid) -> dict:
+    """Sorudaki müşteri kodu, il, kategori, ay ve sayı (ilk N) bilgisini çıkarır."""
+    ent = {}
+    iller, katlar, _ = _sozluk(tum, vid)
+    m_kod = re.search(r"\b([A-Za-z]\d{4,6})\b", soru)
     if m_kod:
-        cid = m_kod.group(1).upper()
-        sub = tum[tum["CustomerID"].str.upper() == cid]
-        if not sub.empty:
-            net = sub["net"].sum()
-            sip = sub["InvoiceNo"].nunique()
-            adet = sub["Quantity"].sum()
-            il = sub["City"].iloc[0]
-            son = sub["gun"].max()
-            pasif = (tum["gun"].max() - son).days
-            ort_ind = (1.0 - net / max(1.0, sub["gross"].sum())) * 100.0
-            en_kat = sub.groupby("Category")["net"].sum().idxmax() if sub["Category"].notna().any() else "—"
-            return (
-                f"<b>{cid}</b> ({il}) müşteri özeti:<br>"
-                f"• Toplam net ciro: <b>{ui.tl(net)}</b> ({ui.sayi(sip)} sipariş · {ui.sayi(adet)} adet)<br>"
-                f"• Ortalama indirim: <b>%{ui.sayi(ort_ind, 1)}</b> · En çok aldığı kategori: <b>{en_kat}</b><br>"
-                f"• Son sipariş: <b>{son:%d.%m.%Y}</b> ({pasif} gün önce)."
-            )
+        es = tum.loc[tum["CustomerID"].str.upper() == m_kod.group(1).upper(), "CustomerID"]
+        if len(es):
+            ent["musteri"] = es.iat[0]
+    metin = " ".join(kel)
+    for n, il in sorted(iller.items(), key=lambda x: -len(x[0])):
+        if (" " in n and n in metin) or any(t == n or (len(n) >= 4 and t.startswith(n)) for t in kel):
+            ent["il"] = il
+            break
+    en_iyi = None
+    for n, kat in katlar.items():
+        kokler = [x for x in re.findall(r"\w+", n) if len(x) >= 4] or [n]
+        if all(any(t.startswith(x) if len(x) >= 4 else t == x for t in kel) for x in kokler):
+            if en_iyi is None or len(n) > len(en_iyi[0]):
+                en_iyi = (n, kat)
+    if en_iyi:
+        ent["kategori"] = en_iyi[1]
+    for i, a in enumerate(_AYLAR_N, 1):
+        if any(t.startswith(_katla(a)) for t in kel):
+            ent["ay"] = i
+            break
+    sayi = re.search(r"(?<![A-Za-z0-9])(\d{1,2})(?![0-9])", soru)
+    if sayi and 1 <= int(sayi.group(1)) <= 30:
+        ent["n"] = int(sayi.group(1))
+    return ent
 
-    # 2. En büyük müşteriler / en çok alan müşteriler sorgusu
-    if re.search(r"en büyük.*müşteri|en çok.*müşteri|top.*müşteri|ilk 5 müşteri", q_low):
-        top5 = tum.groupby(["CustomerID", "City"]).agg(net=("net", "sum"), sip=("InvoiceNo", "nunique")).nlargest(5, "net")
-        satirlar = [f"{i}. <b>{cid}</b> ({il}): {ui.tl(r['net'])} ({ui.sayi(r['sip'])} sipariş)" for i, ((cid, il), r) in enumerate(top5.iterrows(), 1)]
-        return "Verideki en yüksek cirolu 5 müşteri:<br>" + "<br>".join(satirlar)
 
-    # 3. En çok satan ürünler sorgusu
-    if re.search(r"en çok satan ürün|best seller|en popüler kitap|ilk 5 ürün", q_low):
-        top5 = tum.groupby("Description").agg(adet=("Quantity", "sum"), net=("net", "sum")).nlargest(5, "adet")
-        satirlar = [f"{i}. <b>{u[:42]}</b>: {ui.sayi(r['adet'])} adet ({ui.tl(r['net'])})" for i, (u, r) in enumerate(top5.iterrows(), 1)]
-        return "Adet bazında en çok satan 5 ürün:<br>" + "<br>".join(satirlar)
+def _kapsam(tum: pd.DataFrame, ent: dict, kel: list[str]) -> types.SimpleNamespace:
+    """Cevabın hesaplanacağı veri dilimi: sorudaki varlıklar, yoksa soldaki filtreler; tarih: ay > 'tüm yıl' > seçili aralık."""
+    ss = st.session_state
+    m = tum
+    notlar = []
+    for kol, anahtar, filtre in (("Category", "kategori", "f_kat"), ("City", "il", "f_sehir"), ("Description", "urun", "f_urun")):
+        deger = ent.get(anahtar) or (ss.get(filtre) if ss.get(filtre, "Tümü") != "Tümü" else None)
+        if deger:
+            m = m[m[kol] == deger]
+            notlar.append(deger)
+    m_tum, taban, m_c = m, tum, None
+    if ent.get("ay"):
+        yil = int(tum["gun"].max().year)
+        sec = lambda x: x[(x["gun"].dt.month == ent["ay"]) & (x["gun"].dt.year == yil)]
+        m, taban = sec(m), sec(tum)
+        etiket = f"{w.AY_AD[ent['ay'] - 1]} {yil}"
+    elif any(t.startswith(k) for t in kel for k in ("tum", "butun", "yillik")) or not ss.get("a"):
+        etiket = "tüm veri"
+    else:
+        a, b = ss["a"], ss["b"]
+        m, taban = an.araliga_kes(m, a, b), an.araliga_kes(tum, a, b)
+        etiket = ui.tarih_etiketi(a, b)
+        if ss.get("ca"):
+            m_c = an.araliga_kes(m_tum, ss["ca"], ss["cb"])
+    if notlar:
+        etiket += " · " + ", ".join(_e(n) for n in notlar)
+    return types.SimpleNamespace(m=m, m_tum=m_tum, m_c=m_c, taban=taban, etiket=etiket)
 
-    # 4.En çok satan il sorgusu
-    if re.search(r"en çok satan il|hangi il|iller|şehirler", q_low):
-        top5 = tum.groupby("City").agg(net=("net", "sum"), mus=("CustomerID", "nunique"), sip=("InvoiceNo", "nunique")).nlargest(5, "net")
-        tot_net = max(1.0, tum["net"].sum())
-        satirlar = [
-            f"{i}. <b>{il}</b>: {ui.tl(r['net'])} (%{ui.sayi(r['net'] / tot_net * 100, 1)}) · {ui.sayi(r['mus'])} müşteri"
-            for i, (il, r) in enumerate(top5.iterrows(), 1)
-        ]
-        return "Ciroya göre ilk 5 il:<br>" + "<br>".join(satirlar)
 
-    # 5. Şehir / İl adı sorgusu
-    if "City" in tum.columns:
-        iller = tum["City"].dropna().unique().tolist()
-        for il in iller:
-            il_low = _tr_norm(il)
-            if len(il_low) >= 3 and re.search(rf"\b{re.escape(il_low)}", q_low):
-                sub = tum[tum["City"] == il]
-                net = sub["net"].sum()
-                pay = net / max(1.0, tum["net"].sum()) * 100.0
-                mus = sub["CustomerID"].nunique()
-                sip = sub["InvoiceNo"].nunique()
-                en_kat = sub.groupby("Category")["net"].sum().idxmax() if sub["Category"].notna().any() else "—"
-                return (
-                    f"<b>{il}</b> ili canlı veri özeti:<br>"
-                    f"• Net ciro: <b>{ui.tl(net)}</b> (tüm cironun <b>%{ui.sayi(pay, 1)}</b>'i)<br>"
-                    f"• Aktif müşteri: <b>{ui.sayi(mus)}</b> · Sipariş sayısı: <b>{ui.sayi(sip)}</b><br>"
-                    f"• En güçlü kategori: <b>{en_kat}</b>."
-                )
+def _siralama_istegi(kel: list[str], metin: str, ent: dict):
+    sira_k = {_katla(x) for x in _SIRA_KEL}
+    if not any(t in sira_k or t.startswith("sirala") for t in kel):
+        return None
+    boyut, boyut_ad = "Description", "ürün"
+    for kol, kokler, ad in _BOYUT:
+        if (kol == "City" and ent.get("il")) or (kol == "Category" and ent.get("kategori")):
+            continue
+        if _var_mi(kel, kokler):
+            boyut, boyut_ad = kol, ad
+            break
+    if _var_mi(kel, ("indirim", "iskonto")):
+        met = "indirim"
+    elif _var_mi(kel, ("adet",)) or (boyut == "Description" and _var_mi(kel, ("satan", "satıl"))):
+        met = "adet"
+    elif _var_mi(kel, ("sipariş",)) and boyut != "Description":
+        met = "sipariş"
+    elif boyut != "CustomerID" and _var_mi(kel, ("müşteri",)):
+        met = "müşteri"
+    else:
+        met = "net"
+    artan = any(f in metin for f in ("en az", "en dusuk", "en kotu", "en zayif"))
+    return boyut, boyut_ad, met, artan
 
-    # 6. Kategori adı sorgusu
-    if "Category" in tum.columns:
-        kategoriler = sorted(tum["Category"].dropna().unique().tolist(), key=len, reverse=True)
-        for kat in kategoriler:
-            kat_low = _tr_norm(kat)
-            kelimeler = [w for w in re.split(r"[\s/&,-]+", kat_low) if len(w) >= 4]
-            if kat_low in q_low or any(re.search(rf"\b{re.escape(w)}", q_low) for w in kelimeler):
-                sub = tum[tum["Category"] == kat]
-                net = sub["net"].sum()
-                pay = net / max(1.0, tum["net"].sum()) * 100.0
-                adet = sub["Quantity"].sum()
-                ind = (1.0 - net / max(1.0, sub["gross"].sum())) * 100.0
-                en_urun = sub.groupby("Description")["Quantity"].sum().idxmax()
-                return (
-                    f"<b>{kat}</b> kategorisi canlı veri özeti:<br>"
-                    f"• Net ciro: <b>{ui.tl(net)}</b> (toplamın <b>%{ui.sayi(pay, 1)}</b>'i) · Satılan: <b>{ui.sayi(adet)} adet</b><br>"
-                    f"• Ortalama indirim: <b>%{ui.sayi(ind, 1)}</b><br>"
-                    f"• En çok satan ürünü: <b>{en_urun[:48]}</b>."
-                )
 
-    # 7. Ürün / Kitap adı arama (en az 4 harfli anlamlı kelime eşleşmesi)
-    stop_words = {
-        "nedir", "nasıl", "kadar", "hangi", "neden", "niçin", "kimler", "kime", "ürün", "ürünler",
-        "müşteri", "müşteriler", "sipariş", "ciro", "indirim", "stok", "tahmin", "hafta", "günlük",
-        "aylık", "yıllık", "satış", "fiyat", "pazarlama", "tedarik", "kalite", "segment", "analiz",
-    }
-    arama_kelimeleri = [w for w in re.findall(r"\w+", q_low) if len(w) >= 4 and w not in stop_words]
-    if arama_kelimeleri:
-        descs = tum["Description"].dropna().unique()
-        eslesen = [d for d in descs if all(k in _tr_norm(d) for k in arama_kelimeleri)]
-        if not eslesen and len(arama_kelimeleri) >= 1:
-            eslesen = [d for d in descs if arama_kelimeleri[0] in _tr_norm(d)]
-        if 1 <= len(eslesen) <= 15:
-            sec_u = eslesen[0]
-            sub = tum[tum["Description"] == sec_u]
-            net = sub["net"].sum()
-            adet = sub["Quantity"].sum()
-            sip = sub["InvoiceNo"].nunique()
-            liste_f = sub["UnitPrice"].median()
-            ind = (1.0 - net / max(1.0, sub["gross"].sum())) * 100.0
-            son = sub["gun"].max()
-            ek = f" (ve benzer {len(eslesen) - 1} ürün)" if len(eslesen) > 1 else ""
-            return (
-                f"<b>{sec_u}</b>{ek} ürün özeti:<br>"
-                f"• Satılan adet: <b>{ui.sayi(adet)}</b> ({ui.sayi(sip)} sipariş) · Net ciro: <b>{ui.tl(net)}</b><br>"
-                f"• Liste fiyatı: <b>{ui.sayi(liste_f, 2)} ₺</b> · Ortalama indirim: <b>%{ui.sayi(ind, 1)}</b><br>"
-                f"• Son satış tarihi: <b>{son:%d.%m.%Y}</b>."
-            )
+def _sirala_metni(c, boyut: str, boyut_ad: str, met: str, artan: bool, n: int) -> str:
+    m = c.m
+    if m.empty:
+        return f"{c.etiket} için veri yok."
+    if boyut == "City":
+        m = m[m["City"] != "Belirsiz"]
+    g = m.groupby(m["gun"].dt.month if boyut == "ay" else m[boyut])
+    if met == "adet":
+        s, fmt, ad = g["Quantity"].sum(), (lambda v: f"{ui.sayi(v)} adet"), "satılan adet"
+    elif met == "sipariş":
+        s, fmt, ad = g["InvoiceNo"].nunique(), (lambda v: f"{ui.sayi(v)} sipariş"), "sipariş sayısı"
+    elif met == "müşteri":
+        s, fmt, ad = g["CustomerID"].nunique(), (lambda v: f"{ui.sayi(v)} müşteri"), "müşteri sayısı"
+    elif met == "indirim":
+        t = g.agg(n=("net", "sum"), gr=("gross", "sum"), o=("InvoiceNo", "nunique"))
+        t = t[(t["o"] >= 3) & (t["gr"] > 0)]
+        s, fmt, ad = 1 - t["n"] / t["gr"], (lambda v: f"%{ui.sayi(v * 100, 1)} indirim"), "indirim oranı (en az 3 sipariş)"
+    else:
+        s, fmt, ad = g["net"].sum(), ui.tl, "net ciro"
+    s = s.sort_values(ascending=artan).head(n)
+    if s.empty:
+        return f"{c.etiket} için sıralanacak veri yok."
+    toplam = float(m["net"].sum()) if met == "net" else 0.0
 
-    return None
+    def isim(k):
+        if boyut == "ay":
+            return w.AY_AD[int(k) - 1]
+        if boyut == "dow":
+            return _GUN_AD[int(k)]
+        return _kisa(k)
+
+    satir = [f"{i}. <b>{isim(k)}</b>: {fmt(v)}" + (f" · %{ui.sayi(v / toplam * 100, 1)}" if toplam else "") for i, (k, v) in enumerate(s.items(), 1)]
+    return f"{('İ' + boyut_ad[1:]) if boyut_ad.startswith('i') else boyut_ad.capitalize()} sıralaması — {'en düşük' if artan else 'en yüksek'} {len(s)}, {ad}:<br>" + "<br>".join(satir)
+
+
+def _musteri_metni(c, tum: pd.DataFrame, cid: str) -> str:
+    sub = tum[tum["CustomerID"] == cid]
+    net, gr = float(sub["net"].sum()), float(sub["gross"].sum())
+    son = sub["gun"].max()
+    il = sub["City"].mode().iat[0] if sub["City"].notna().any() else "—"
+    en_kat = sub.groupby("Category")["net"].sum().idxmax() if sub["Category"].notna().any() else "—"
+    s = (f"<b>{_e(cid)}</b> ({_e(il)}) · tüm veri:<br>"
+         f"• Net ciro <b>{ui.tl(net)}</b> · {ui.sayi(sub['InvoiceNo'].nunique())} sipariş · {ui.sayi(sub['Quantity'].sum())} adet<br>"
+         f"• Ortalama indirim <b>%{ui.sayi((1 - net / gr) * 100 if gr else 0, 1)}</b> · en çok aldığı kategori <b>{_e(en_kat)}</b><br>"
+         f"• Son sipariş <b>{son:%d.%m.%Y}</b> ({(tum['gun'].max() - son).days} gün önce)")
+    try:
+        churn, _ = w.churn_c(tum, (st.session_state.get("dosya_adi", ""), len(tum)))
+        if cid in churn.index:
+            r = churn.loc[cid]
+            s += f"<br>• 30 gün içinde sipariş vermeme olasılığı <b>%{ui.sayi(r['p'] * 100, 0)}</b> ({r['risk']} risk), beklenen aylık ciro ≈ {ui.tl(r['m30'])}"
+    except Exception:
+        pass
+    return s
+
+
+def _varlik_metni(c, ent: dict) -> str | None:
+    for anahtar, tur in (("urun", "ürün"), ("kategori", "kategori"), ("il", "il")):
+        if ent.get(anahtar):
+            ad = ent[anahtar]
+            break
+    else:
+        return None
+    m = c.m
+    if m.empty:
+        return f"<b>{_kisa(ad)}</b> için bu kapsamda satış yok."
+    net, gr = float(m["net"].sum()), float(m["gross"].sum())
+    pay = net / max(1.0, float(c.taban["net"].sum())) * 100
+    s = (f"<b>{_kisa(ad, 60)}</b> ({tur}):<br>"
+         f"• Net ciro <b>{ui.tl(net)}</b> (aynı dönem toplamının %{ui.sayi(pay, 1)}’i) · {ui.sayi(m['InvoiceNo'].nunique())} sipariş · {ui.sayi(m['CustomerID'].nunique())} müşteri<br>"
+         f"• Satılan <b>{ui.sayi(m['Quantity'].sum())}</b> adet · ortalama indirim %{ui.sayi((1 - net / gr) * 100 if gr else 0, 1)}")
+    if tur == "ürün":
+        s += f"<br>• Liste fiyatı {ui.sayi(m['UnitPrice'].median(), 2)} ₺ · son satış {m['gun'].max():%d.%m.%Y}"
+    else:
+        if tur == "il" and m["Category"].notna().any():
+            s += f"<br>• En güçlü kategori <b>{_e(m.groupby('Category')['net'].sum().idxmax())}</b>"
+        s += f"<br>• En çok satan ürün <b>{_kisa(m.groupby('Description')['Quantity'].sum().idxmax())}</b>"
+    return s
+
+
+def _urun_ara(kel: list[str], tum: pd.DataFrame, vid):
+    durak = {_katla(x) for x in _DURAK}
+    aday = [t for t in kel if len(t) >= 4 and t not in durak]
+    if not aday:
+        return None
+    _, _, urunler = _sozluk(tum, vid)
+    es = [d for n, d in urunler if all(t in n for t in aday)]
+    if not es:
+        uzun = max(aday, key=len)
+        es = [d for n, d in urunler if uzun in n]
+    if not es or len(es) > 30:
+        return None
+    return tum[tum["Description"].isin(es)].groupby("Description")["net"].sum().idxmax()
+
+
+# ---- Canlı veriyle cevaplanan konular ----
+def _c_ozet(c, ctx):
+    m = c.m
+    if m.empty:
+        return f"{c.etiket} için veri yok."
+    net, gr, sip = float(m["net"].sum()), float(m["gross"].sum()), m["InvoiceNo"].nunique()
+    s = (f"• Net ciro <b>{ui.tl(net)}</b> · {ui.sayi(sip)} sipariş · {ui.sayi(m['CustomerID'].nunique())} müşteri<br>"
+         f"• Ortalama sepet <b>{ui.tl(net / max(1, sip))}</b> · indirim oranı <b>%{ui.sayi((1 - net / gr) * 100 if gr else 0, 1)}</b>")
+    if c.m_c is not None and not c.m_c.empty:
+        ss = st.session_state
+        g1 = (pd.Timestamp(ss["b"]) - pd.Timestamp(ss["a"])).days + 1
+        g0 = (pd.Timestamp(ss["cb"]) - pd.Timestamp(ss["ca"])).days + 1
+        d = w.rel(net / g1, float(c.m_c["net"].sum()) / g0)
+        s += f"<br>• Karşılaştırma dönemine göre günlük ciro <b>{'+' if d >= 0 else '−'}%{ui.sayi(abs(d) * 100, 1)}</b>"
+    return s
+
+
+def _c_degisim(c, ctx):
+    ss = st.session_state
+    if not ss.get("a") or not ss.get("ca"):
+        return None
+    S, C = an.ozet(c.m_tum, ss["a"], ss["b"]), an.ozet(c.m_tum, ss["ca"], ss["cb"])
+    ef = an.kopru(S, C)
+    adlar = ["sipariş sayısı", "sepet adedi", "ürün karması (liste fiyatı)", "indirim"]
+    dom = int(np.argmax(np.abs(ef)))
+    d = w.rel(S["dnet"], C["dnet"])
+    return (f"Günlük ciro karşılaştırma dönemine göre <b>{'arttı' if d >= 0 else 'düştü'} (%{ui.sayi(abs(d) * 100, 1)})</b>: "
+            f"{ui.sayi(C['dnet'] / 1000, 1)} → {ui.sayi(S['dnet'] / 1000, 1)} bin ₺. En büyük etki: <b>{adlar[dom]}</b>.<br>"
+            + " · ".join(f"{a} {ui.isaret(v / 1000, 1)} bin ₺" for a, v in zip(adlar, ef)))
+
+
+def _c_churn(c, ctx):
+    tum = ctx["tum"]
+    churn, _ = w.churn_c(tum, ctx["vid"])
+    ch = churn[churn.index.isin(set(c.m_tum["CustomerID"].unique()))]
+    yuk = ch[ch["risk"] == "Yüksek"].assign(k=lambda x: x["m30"] * x["p"]).sort_values("k", ascending=False)
+    if yuk.empty:
+        return "Bu kapsamda yüksek riskli müşteri yok."
+    return (f"<b>{ui.sayi(len(yuk))}</b> müşteri yüksek riskli (30 günde sipariş vermeme olasılığı ≥ %70); beklenen aylık kayıp ≈ <b>{ui.tl(yuk['k'].sum())}</b>. Önce şunları ara:<br>"
+            + "<br>".join(f"{i}. <b>{_e(cid)}</b> — %{ui.sayi(r['p'] * 100, 0)} risk, beklenen kayıp ≈ {ui.tl(r['k'])}" for i, (cid, r) in enumerate(yuk.head(5).iterrows(), 1)))
+
+
+def _c_satissiz(c, ctx):
+    bit = ctx["tum"]["gun"].max()
+    g = c.m_tum.groupby("Description").agg(son=("gun", "max"), net=("net", "sum"))
+    g["gun"] = (bit - g["son"]).dt.days
+    uzun = g[g["gun"] >= 120].sort_values("net", ascending=False)
+    s = f"<b>{ui.sayi(len(uzun))}</b> ürün 120+ gündür satılmıyor (toplam {ui.sayi(len(g))} üründen)."
+    if len(uzun):
+        s += "<br>Geçmiş cirosu en yüksek olanlar:<br>" + "<br>".join(
+            f"{i}. {_kisa(u)} — {int(r['gun'])} gün, {ui.tl(r['net'])}" for i, (u, r) in enumerate(uzun.head(5).iterrows(), 1))
+    return s
+
+
+def _c_tahmin(c, ctx):
+    baz, wape, bant = an2.baz_tahmin30(c.m_tum, ctx["tum"]["gun"].max())
+    return (f"Önümüzdeki 30 gün için baz ciro tahmini ≈ <b>{ui.tl(baz)}</b> (%80 aralık {ui.tl(baz * (1 - bant))} – {ui.tl(baz * (1 + bant))}). "
+            f"Geriye dönük testte 4 haftalık hata %{ui.sayi(wape * 100, 0)}.")
+
+
+def _c_fazla(c, ctx):
+    top, kat = an2.norm_asimi(ctx["tum"], c.m)
+    s = (f"<b>{ui.sayi(top['asan_siparis'])}</b> siparişte (toplam {ui.sayi(top['toplam'])}) indirim, aynı kategori ve benzer büyüklükteki siparişlerin normunu 10+ puan aşıyor. "
+         f"Normun üstündeki fazla ≈ <b>{ui.tl(top['fazla'])}</b>.")
+    if len(kat):
+        s += "<br>En çok aşılan kategoriler: " + ", ".join(f"{_e(k)} (%{ui.sayi(r['pay'] * 100, 0)})" for k, r in kat.head(3).iterrows())
+    return s
+
+
+def _c_indirim(c, ctx):
+    m = c.m
+    gr = float(m["gross"].sum())
+    if gr <= 0:
+        return None
+    s = f"Ağırlıklı indirim oranı <b>%{ui.sayi((1 - m['net'].sum() / gr) * 100, 1)}</b> (brüt {ui.tl(gr)}, net {ui.tl(m['net'].sum())})."
+    t = m.dropna(subset=["Category"]).groupby("Category").agg(n=("net", "sum"), g=("gross", "sum"))
+    if len(t) > 1:
+        t["d"] = 1 - t["n"] / t["g"]
+        s += "<br>En yüksek indirimli kategoriler: " + ", ".join(f"{_e(k)} %{ui.sayi(v * 100, 1)}" for k, v in t["d"].nlargest(3).items())
+    return s
+
+
+def _c_birlikte(c, ctx):
+    ciftler = an.birlikte(c.m, limit=3)
+    if not ciftler:
+        return "Bu kapsamda tesadüften sık birlikte alınan ürün çifti bulunamadı."
+    return "Aynı siparişte en sık birlikte alınan çiftler (lift: tesadüfe göre kaç kat sık):<br>" + "<br>".join(
+        f"{i}. <b>{_kisa(x['a'], 36)}</b> + <b>{_kisa(x['b'], 36)}</b> — {x['n']} sipariş, lift {ui.sayi(x['lift'], 1)}" for i, x in enumerate(ciftler, 1))
+
+
+def _c_gun(c, ctx):
+    dow = c.m.groupby("dow")["net"].sum().reindex(range(7), fill_value=0)
+    if dow.sum() <= 0:
+        return None
+    pay = dow / dow.sum() * 100
+    return (f"Cironun <b>%{ui.sayi(pay.max(), 0)}</b>’i {_GUN_AD[int(pay.idxmax())].lower()} günü geliyor; hafta sonu payı %{ui.sayi(pay[5] + pay[6], 1)}.<br>"
+            + " · ".join(f"{_GUN_AD[i][:3]} %{ui.sayi(pay[i], 0)}" for i in range(7)))
+
+
+def _c_aylik(c, ctx):
+    m = c.m_tum
+    yil = int(m["gun"].dt.year.mode().iloc[0])
+    ay = an2.aylik(m, yil)
+    if ay is None or not (ay["net"] > 0).any():
+        return None
+    dolu = ay[ay["net"] > 0]
+    en, dus = int(dolu["net"].idxmax()), int(dolu["net"].idxmin())
+    return (f"{yil} yılında en yüksek ciro <b>{w.AY_AD[en - 1]}</b> ({ui.tl(dolu.loc[en, 'net'])}), en düşük <b>{w.AY_AD[dus - 1]}</b> ({ui.tl(dolu.loc[dus, 'net'])}).<br>"
+            "<small>Tek yıllık veride bu desen mevsimsellik değil, o yılın aylık dağılımıdır.</small>")
+
+
+def _c_portfoy(c, ctx):
+    pm, pu = an.pareto(c.m, "CustomerID"), an.pareto(c.m, "Description")
+    if pm.empty:
+        return None
+    a1, a2 = int((pm["seg"] == "A").sum()), int((pu["seg"] == "A").sum())
+    return (f"Müşterilerin %{ui.sayi(a1 / len(pm) * 100, 1)}’i ({ui.sayi(a1)}) ve ürünlerin %{ui.sayi(a2 / len(pu) * 100, 1)}’i ({ui.sayi(a2)}) cironun %80’ini getiriyor (A). "
+            "B sonraki %15'i, C son %5'i getirir.")
+
+
+def _c_rfm(c, ctx):
+    ss = st.session_state
+    a, b = (ss["a"], ss["b"]) if ss.get("a") else (ctx["tum"]["gun"].min(), ctx["tum"]["gun"].max())
+    rf, onceden = an2.rfm(ctx["tum"], c.m_tum, a, b)
+    if rf.empty:
+        return None
+    say = rf["seg"].value_counts()
+    return (f"Seçili dönemde sipariş veren {ui.sayi(len(rf))} müşteri: " + " · ".join(f"{an2.SEG_AD[i]} <b>{ui.sayi(say.get(i, 0))}</b>" for i in range(6))
+            + f".<br>Dönemde sipariş vermeyen eski müşteri: {ui.sayi(len(onceden))}.")
+
+
+def _c_kohort(c, ctx):
+    _, kg = an2.kohort_ceyrek(c.m_tum)
+    if kg[1] is None:
+        return "Kohort hesabı için en az iki çeyreklik veri gerekir."
+    return (f"Yeni müşterilerin ilk siparişten sonraki çeyrekte <b>%{ui.sayi(kg[1], 0)}</b>’i" + (f", ikinci çeyrekte <b>%{ui.sayi(kg[2], 0)}</b>’i" if kg[2] is not None else "")
+            + f" tekrar sipariş verdi; yaklaşık %{ui.sayi(100 - kg[1], 0)}’i ilk çeyrekten sonra sessizleşiyor. İlk 30–45 günde çapraz kategori teklifi önerilir.<br>"
+            "<small>Verinin başladığı çeyrekteki kohort (o tarihte zaten müşteri olanlar) ortalamaya katılmadı.</small>")
+
+
+def _c_taban(c, ctx):
+    ss = st.session_state
+    if not ss.get("a") or not ss.get("ca"):
+        return None
+    ch = an2.musteri_degisim(ctx["tum"], c.m_tum, ss["a"], ss["b"], ss["ca"], ss["cb"])
+    net = ch["aS"] - ch["aC"]
+    s = (f"Aktif müşteri {ui.sayi(ch['aC'])} → <b>{ui.sayi(ch['aS'])}</b> ({'+' if net >= 0 else '−'}{ui.sayi(abs(net))}).<br>"
+         f"• Yeni <b>{ui.sayi(ch['nw'])}</b> · geri dönen <b>{ui.sayi(ch['bk'])}</b> · kaybedilen <b>{ui.sayi(ch['ls'])}</b> (karşılaştırmada alıp bu dönemde almayan)")
+    simdi = set(an.araliga_kes(c.m_tum, ss["a"], ss["b"])["CustomerID"])
+    onceki = an.araliga_kes(c.m_tum, ss["ca"], ss["cb"])
+    kayip = onceki[~onceki["CustomerID"].isin(simdi)].groupby("CustomerID")["net"].sum().nlargest(5)
+    if len(kayip):
+        s += "<br>Karşılaştırma dönemi cirosu en yüksek kaybedilenler: " + ", ".join(f"<b>{_e(k)}</b> ({ui.tl(v)})" for k, v in kayip.items())
+    return s
+
+
+def _c_mevsim(c, ctx):
+    cats, sm, yil = an2.mevsimsellik(c.m_tum)
+    if not cats:
+        return None
+    satir = []
+    for kat, deg in zip(cats[:6], sm[:6]):
+        j, k = int(np.argmax(deg)), int(np.argmin(deg))
+        satir.append(f"• <b>{_e(kat)}</b>: en güçlü {w.AY_AD[j]} ({ui.sayi(deg[j] / 100, 1)} kat), en zayıf {w.AY_AD[k]}")
+    return (f"{yil} yılında en çok satan kategorilerin aylık talep endeksi (1 = kendi ortalaması):<br>" + "<br>".join(satir)
+            + "<br><small>Tek yıllık veride bu desen mevsimsellik değil, o yılın aylık dağılımıdır.</small>")
+
+
+def _c_gecikme(c, ctx):
+    tum = ctx["tum"]
+    b = st.session_state.get("b") or tum["gun"].max()
+    gd = an2.gecikme(tum, None, b)
+    gd = gd[gd.index.isin(set(c.m_tum["CustomerID"].unique()))]
+    say = gd.value_counts()
+    cok = tum[tum["CustomerID"].isin(gd[gd == 2].index)].groupby("CustomerID")["net"].sum().nlargest(5)
+    s = (f"{ui.tarih_etiketi(b, b)} itibarıyla <b>{ui.sayi(say.get(2, 0))}</b> müşteri kendi tipik sipariş aralığının 2 katından uzun süredir sipariş vermedi; "
+         f"{ui.sayi(say.get(1, 0))} müşteri gecikmiş (1–2 kat), {ui.sayi(say.get(0, 0))} müşteri zamanında.")
+    if len(cok):
+        s += "<br>Cirosu en yüksek çok gecikmiş müşteriler: " + ", ".join(f"<b>{_e(k)}</b> ({ui.tl(v)})" for k, v in cok.items())
+    return s
+
+
+def _c_xyz(c, ctx):
+    q, _, abc, xyz = an2.abc_xyz(c.m_tum)
+    if q.empty:
+        return None
+    say = (abc + xyz).value_counts()
+    return (f"{ui.sayi(len(q))} ürün, adet bazlı ABC ve aylık talep oynaklığına (XYZ) göre: "
+            + " · ".join((f"<b>{k} {ui.sayi(say.get(k, 0))}</b>" if k == "AZ" else f"{k} {ui.sayi(say.get(k, 0))}") for k in an2.POLITIKA)
+            + ".<br>AZ ürünler yüksek hacimli ama düzensiz talepli: sık kontrol ve yüksek güvenlik stoğu gerekir.")
+
+
+def _c_kalite(c, ctx):
+    kal = st.session_state.get("kalite") or {}
+    if not kal:
+        return None
+    ham, tem = kal["ham_satir"], kal["temiz_satir"]
+    at, tek = kal.get("atilan", ham - tem), kal.get("tekrar", 0)
+    s = (f"Ham verideki <b>{ui.sayi(ham)}</b> satırdan <b>{ui.sayi(at)}</b> geçersiz satır (eksik alan, ≤ 0 miktar/fiyat, net fiyat > liste fiyatı) çıkarıldı; "
+         f"<b>{ui.sayi(tem)}</b> satır (%{ui.sayi(tem / ham * 100, 3)}) kullanıldı.<br>"
+         f"Birebir tekrar eden <b>{ui.sayi(tek)}</b> satır (%{ui.sayi(tek / ham * 100, 2)}) aynı siparişte çift okutma olabileceği için silinmedi.")
+    if kal.get("iade_satir"):
+        s += f"<br>{ui.sayi(kal['iade_satir'])} iade satırı (≈ {ui.tl(kal.get('iade_tutar', 0))}) satış analizlerine dahil değil."
+    bos = {k: v for k, v in (kal.get("bos") or {}).items() if v}
+    if bos:
+        s += "<br>Boş alanlar: " + ", ".join(f"{_e(k)} {ui.sayi(v)}" for k, v in bos.items()) + "."
+    return s
+
+
+_CANLI = {
+    "ozet": _c_ozet, "degisim": _c_degisim, "churn": _c_churn, "satissiz": _c_satissiz, "tahmin": _c_tahmin,
+    "fazla_indirim": _c_fazla, "indirim": _c_indirim, "birlikte": _c_birlikte, "gun": _c_gun, "aylik": _c_aylik,
+    "mevsim": _c_mevsim, "gecikme": _c_gecikme, "xyz": _c_xyz, "portfoy": _c_portfoy, "rfm": _c_rfm, "kohort": _c_kohort, "musteri_tabani": _c_taban, "kalite": _c_kalite,
+}
+_HEP_CANLI = {"kalite", "kohort", "degisim"}
+
+
+def _dipnot(txt: str) -> str:
+    return f"<div style='font-size:11.5px;color:var(--muted);margin-top:5px'>{txt}</div>"
 
 
 def _cevap_uret(soru: str, bilgi: dict, sayfa: str) -> str:
-    """Soruya sayfa bağlamı, bilgi tabanı ve canlı veri üzerinden yanıt üretir."""
-    s = soru.strip().lower()
+    """Soruyu kelimelere ayırır; konu, sıralama isteği ve varlıkları (müşteri, il, kategori, ay, ürün, N) çıkarıp
+    sayfa bilgisi veya canlı veriden cevap üretir."""
+    kel = _kel(soru)
+    if not kel:
+        return _yardim()
+    metin = " ".join(kel)
+    esleme = _BILGI_ESLEME.get(sayfa, {})
+    B = {esleme.get(k, k): v for k, v in (bilgi or {}).items() if v}
     tum = st.session_state.get("df")
 
-    # 1. Sayfaya özel hızlı eşleşmeler
-    if sayfa == "yonetici":
-        if re.search(r"gelecek ay|30 gün|tahmin|ne olur", s) and bilgi.get("ciro"):
-            return bilgi["ciro"]
-        if re.search(r"aksiyon|en çok getiren|simülasyon|getiri", s) and bilgi.get("indirim"):
-            return bilgi["indirim"]
-    elif sayfa == "pazarlama":
-        if re.search(r"kaybet|yeni müşteri.*kaç|geri dönen|değişti|taban", s) and bilgi.get("kopru"):
-            return bilgi["kopru"]
-        if re.search(r"kalıyor mu|kohort|tekrar sipariş|tutma", s):
-            return "Yeni müşterilerin ilk siparişten sonraki çeyrekte yaklaşık <b>%44'ü</b>, ikinci çeyrekte <b>%53'ü</b> tekrar sipariş veriyor; yani yeni müşterilerin yarısından fazlası ilk çeyrekten sonra sessizleşiyor. İlk 30–45 günde çapraz kategori kuponu önerilir."
-        if re.search(r"gecik|aralık|uzayan", s) and bilgi.get("churn"):
-            return bilgi["churn"]
-        if re.search(r"rfm|davranış|şampiyon", s) and bilgi.get("segment"):
-            return bilgi["segment"]
-    elif sayfa == "tedarik":
-        if re.search(r"8 hafta|talep|tahmin|holt", s) and bilgi.get("kopru"):
-            return bilgi["kopru"]
-        if re.search(r"güvenlik stoğu|sipariş noktası|stok", s) and bilgi.get("indirim"):
-            return bilgi["indirim"]
-        if re.search(r"satışsız|satılmayan|120|hareketsiz|yavaş", s) and bilgi.get("churn"):
-            return bilgi["churn"]
-        if re.search(r"düzensiz|xyz|az\b", s) and bilgi.get("segment"):
-            return bilgi["segment"]
+    puan = {}
+    for ad, kokler, ifadeler in _KONULAR:
+        p = sum(1 for k in kokler if any(_eslesir(t, k) for t in kel)) + 2 * sum(1 for f in ifadeler if _katla(f) in metin)
+        if p:
+            puan[ad] = p + (0.5 if ad in B else 0)
+    konu = max(puan, key=lambda k: (puan[k], -_KONU_SIRA[k])) if puan else None
 
-    # 2. Genel bilgi sözlüğü eşleşmeleri
-    if re.search(r"neden düştü|neden değişti|köprü|fark|düşüş|artış", s) and bilgi.get("kopru"):
-        return bilgi["kopru"]
-    if re.search(r"kimi aramalı|churn|risk|bırak|terk|kayıp", s) and bilgi.get("churn"):
-        return bilgi["churn"]
-    if re.search(r"fazla indirim|şüpheli|anomali|norm|indirim", s) and bilgi.get("indirim"):
-        return bilgi["indirim"]
-    if re.search(r"birlikte|sepet|çift|seri", s) and bilgi.get("birlikte"):
-        return bilgi["birlikte"]
-    if re.search(r"pazartesi|haftanın günü|hafta sonu|yoğun", s) and bilgi.get("gun"):
-        return bilgi["gun"]
-    if re.search(r"pareto|segment|a-b-c|80", s) and bilgi.get("segment"):
-        return bilgi["segment"]
-    if re.search(r"kaç satır|temiz|veri kalitesi|bozulmuş|tekrar eden", s):
-        kal = st.session_state.get("kalite") or {}
-        ham = kal.get("ham_satir", 664154)
-        tem = kal.get("temiz_satir", 664133)
-        at = kal.get("atilan", ham - tem)
-        tek = kal.get("tekrar", 6217)
-        return (
-            f"Ham verideki <b>{ui.sayi(ham)}</b> satırdan sıfır/negatif miktar veya fiyatlı <b>{ui.sayi(at)}</b> satır temizlendi; "
-            f"<b>{ui.sayi(tem)}</b> satır (%99,997) kullanıldı. Birebir tekrar eden <b>{ui.sayi(tek)}</b> satır (%0,9) aynı siparişte çift okutma olabileceği için silinmedi."
-        )
-    if re.search(r"maliyet|kâr|brüt", s):
-        return (
-            "Veride ürün alış maliyeti sütunu bulunmuyor. Satış & Fiyat sayfasındaki <b>İndirim planı</b> modülünde alış maliyetini "
-            "liste fiyatın yüzdesi olarak (varsayılan <b>%44</b>) kendin değiştirebilirsin."
-        )
-    if re.search(r"formül|metrik|sözlük|nasıl hesap", s):
-        return (
-            "<b>Temel Formüller:</b><br>"
-            "• <b>Net ciro</b> = Σ (Miktar × Net Fiyat)<br>"
-            "• <b>İndirim oranı</b> = 1 − (Net Ciro / Brüt Ciro)<br>"
-            "• <b>Fazla indirim</b> = Σ (Sipariş İndirimi − Kategori Medyanı) × Brüt Tutar (10+ puan aşanlar)<br>"
-            "• <b>Sipariş noktası</b> = Haftalık Talep × Tedarik Süresi + z × σ × √Süre."
-        )
+    if konu == "formul":
+        return _FORMUL
+    if konu == "maliyet":
+        return _MALIYET
+    if konu == "yardim":
+        return _yardim()
+    if tum is None or tum.empty:
+        return B.get(konu) or "Veri yüklenmediği için bu soruyu cevaplayamıyorum."
 
-    # 3. Canlı DataFrame üzerinde varlık (müşteri, il, kategori, ürün) araması
-    canli = _canli_veri_ara(soru, tum)
-    if canli:
-        return canli
+    vid = (st.session_state.get("dosya_adi", ""), len(tum))
+    ctx = {"tum": tum, "vid": vid}
+    try:
+        ent = _varliklar(soru, kel, tum, vid)
+        c = _kapsam(tum, ent, kel)
+        kapsam_notu = _dipnot(f"Kapsam: {c.etiket}")
 
-    # 4. Ciro genel sorusu
-    if re.search(r"ciro|satış|sipariş|durum|özet", s) and bilgi.get("ciro"):
-        return bilgi["ciro"]
+        sirala = _siralama_istegi(kel, metin, ent)
+        if sirala and konu in (None, "ozet", "indirim"):
+            if sirala[0] == "ay" and not ent.get("ay"):
+                c = _kapsam(tum, ent, kel + ["tum"])  # ay sıralaması tüm dönem üzerinden yapılır
+                kapsam_notu = _dipnot(f"Kapsam: {c.etiket}")
+            return _sirala_metni(c, *sirala, ent.get("n", 12 if sirala[0] == "ay" else 5)) + kapsam_notu
+        if ent.get("musteri") and konu in (None, "ozet", "churn", "indirim"):
+            return _musteri_metni(c, tum, ent["musteri"])
+        if konu in (None, "ozet") and (ent.get("il") or ent.get("kategori")):
+            return _varlik_metni(c, ent) + kapsam_notu
+        if konu is None:
+            urun = _urun_ara(kel, tum, vid)
+            if urun is not None:
+                ent["urun"] = urun
+                c = _kapsam(tum, ent, kel)
+                return _varlik_metni(c, ent) + _dipnot(f"Kapsam: {c.etiket}")
+            return _yardim()
 
-    # 5. Varsayılan yardımcı yanıt
-    return (
-        "Bu soruya özel doğrudan bir eşleşme bulamadım ancak şunları sorabilirsin:<br>"
-        "• <b>Konular:</b> “Ciro neden düştü?”, “İlk kimi aramalı?”, “Fazla indirim ne kadar?”, “Birlikte alınanlar”, “8 hafta talep tahmini”, “Güvenlik stoğu”<br>"
-        "• <b>Canlı veri sorgusu:</b> Bir müşteri kodu (örn. <code>S00172</code>), şehir adı (örn. <code>İstanbul</code>, <code>Ankara</code>), kategori (örn. <code>Polisiye</code>, <code>Sözlük</code>) veya kitap adı (örn. <code>Kral Şakir</code>, <code>Karantina</code>) yazabilirsin!"
-    )
+        varlik_var = any(ent.get(k) for k in ("il", "kategori", "ay"))
+        if konu in B and not varlik_var and konu not in _HEP_CANLI:
+            return B[konu] + _dipnot(f"Kaynak: {SAYFA_AD.get(sayfa, 'bu')} sayfası")
+        fn = _CANLI.get(konu)
+        r = fn(c, ctx) if fn else None
+        if r:
+            return (r if konu == "kalite" else r + kapsam_notu)
+        if konu in B:
+            return B[konu]
+        hedef = _KONU_SAYFA.get(konu)
+        if hedef:
+            return f"Bu bilgi <b>{SAYFA_AD[hedef]}</b> sayfasında hesaplanıyor; o sayfadayken sorarsan ayrıntılı cevap verebilirim."
+    except Exception as exc:
+        return f"Bu soruyu yanıtlarken bir sorun oluştu ({_e(type(exc).__name__)}). Soruyu farklı kelimelerle deneyebilirsin."
+    return _yardim()
 
 
 def rafbot(bilgi: dict):
-    """Sağ altta yüzen (floating) Ayraç AI · Veriye sor sohbet kutusunu oluşturur."""
-    sayfa = _sayfa_tespit(bilgi)
+    """Sağ altta yüzen (floating) Akıllı Asistan · Veriye sor sohbet kutusunu oluşturur."""
+    sayfa = st.session_state.get("_aktif_sayfa") or "satis"
     ss = st.session_state
     ss.setdefault(
         "ayrac_ai_msgs",
         [
             {
                 "role": "assistant",
-                "text": "Merhaba! Ben <b>Ayraç AI</b> 🔖 — B2B Karar Destek Sistemi'nin akıllı iş zekâsı asistanıyım. Bu sayfadaki veriler, müşteri kodları (örn. <code>S00172</code>), şehirler, kategoriler veya ürünler hakkında bana soru sorabilir ya da hazır başlıklara tıklayabilirsin.",
+                "text": "Merhaba! Ben <b>Akıllı Asistan</b>. Sorunu kendi cümlenle yazabilirsin: “İzmir'de en çok satan 5 ürün”, “kasım ayında ciro”, “ciro neden düştü?”, bir müşteri kodu (<code>S00172</code>) ya da kitap adı. Cevaplar soldaki tarih ve filtreleri kullanır.",
             }
         ],
     )
@@ -2334,7 +2871,7 @@ def rafbot(bilgi: dict):
         div[data-testid="stPopover"] button[data-testid="stPopoverButton"] {
             background: #3d9a84 !important;
             color: #ffffff !important;
-            border: 2px solid #ffffff !important;
+            border: 2px solid var(--card) !important;
             border-radius: 999px !important;
             padding: 10px 18px !important;
             font-family: 'Poppins', sans-serif !important;
@@ -2373,8 +2910,8 @@ def rafbot(bilgi: dict):
             color: #cfd6e6;
         }
         .rb-msg-bot {
-            background: #f0ebe2;
-            color: #1f2a44;
+            background: var(--track);
+            color: var(--fg);
             padding: 8px 11px;
             border-radius: 10px 10px 10px 3px;
             font-size: 12px;
@@ -2397,10 +2934,10 @@ def rafbot(bilgi: dict):
         unsafe_allow_html=True,
     )
 
-    with st.popover("🔖 Ayraç AI · Veriye sor"):
+    with st.popover("✨ Akıllı Asistan · Veriye sor"):
         st.markdown(
             "<div class='rb-header'>"
-            "<div><div class='rb-title'>🔖 Ayraç AI · Veriye sor</div>"
+            "<div><div class='rb-title'>✨ Akıllı Asistan · Veriye sor</div>"
             "<div class='rb-sub'>Kitap &amp; Kırtasiye B2B Akıllı Karar Asistanı</div></div>"
             "</div>",
             unsafe_allow_html=True,
@@ -2415,7 +2952,7 @@ def rafbot(bilgi: dict):
                 continue
             cols = st.columns(len(row_chips))
             for c_idx, soru_metni in enumerate(row_chips):
-                if cols[c_idx].button(soru_metni, key=f"rb_chip_{sayfa}_{r_idx}_{c_idx}", use_container_width=True):
+                if cols[c_idx].button(soru_metni, key=f"rb_chip_{sayfa}_{r_idx}_{c_idx}", width="stretch"):
                     yanit = _cevap_uret(soru_metni, bilgi, sayfa)
                     ss["ayrac_ai_msgs"].append({"role": "user", "text": soru_metni})
                     ss["ayrac_ai_msgs"].append({"role": "assistant", "text": yanit})
@@ -2435,19 +2972,19 @@ def rafbot(bilgi: dict):
             f1, f2 = st.columns([3.2, 1])
             girilen = f1.text_input(
                 "Sorunuz",
-                placeholder="Örn: Ciro neden düştü, S00172, İstanbul, Polisiye…",
+                placeholder="Örn: İzmir'de en çok satan 5 ürün, S00172, ciro neden düştü…",
                 label_visibility="collapsed",
             )
-            gonder = f2.form_submit_button("Sor", type="primary", use_container_width=True)
+            gonder = f2.form_submit_button("Sor", type="primary", width="stretch")
             if gonder and girilen.strip():
                 yanit = _cevap_uret(girilen.strip(), bilgi, sayfa)
-                ss["ayrac_ai_msgs"].append({"role": "user", "text": girilen.strip()})
+                ss["ayrac_ai_msgs"].append({"role": "user", "text": _html.escape(girilen.strip())})
                 ss["ayrac_ai_msgs"].append({"role": "assistant", "text": yanit})
                 st.rerun()
 
         alt1, alt2 = st.columns([2, 1])
-        alt1.caption("İpucu: Müşteri kodu, il veya kitap adı da yazabilirsin.")
-        if alt2.button("Temizle", key=f"rb_temizle_{sayfa}", use_container_width=True):
+        alt1.caption("İpucu: “tüm yıl”, bir ay adı, il, kategori veya “en çok/en az” ekleyerek soruyu daraltabilirsin.")
+        if alt2.button("Temizle", key=f"rb_temizle_{sayfa}", width="stretch"):
             ss["ayrac_ai_msgs"] = [ss["ayrac_ai_msgs"][0]]
             st.rerun()
 
@@ -2482,10 +3019,10 @@ def sayfa_yukle():
         kaynak = st.radio("Veri kaynağı", secenekler, index=0, horizontal=True, label_visibility="collapsed")
         if kaynak == sec_ornek:
             f = ORNEK[0]
-            st.markdown(f"<div class='card' style='border:2px solid #3d9a84;background:#f4faf8;border-radius:14px;padding:16px 18px;margin-bottom:10px'>"
-                        f"<div style='font-size:12px;color:#14513f;font-weight:700'>✓ SEÇİLİ DOSYA</div>"
+            st.markdown(f"<div class='card' style='border:2px solid #3d9a84;background:var(--soft);border-radius:14px;padding:16px 18px;margin-bottom:10px'>"
+                        f"<div style='font-size:12px;color:var(--vurgu);font-weight:700'>✓ SEÇİLİ DOSYA</div>"
                         f"<div style='font-size:16px;font-weight:700;margin:4px 0 2px'>📄 {f.name}</div>"
-                        f"<div style='font-size:12px;color:#5b6475'>{f.stat().st_size / 1048576:.1f} MB · 2020 yılı B2B işlem verisi · 9 zorunlu sütun hazır</div></div>",
+                        f"<div style='font-size:12px;color:var(--muted)'>{f.stat().st_size / 1048576:.1f} MB · {f.parent.name} klasörü · B2B işlem verisi · 9 zorunlu sütun hazır</div></div>",
                         unsafe_allow_html=True)
             if st.button("Bu dosyayla devam et", type="primary"):
                 dosya_adi, icerik = f.name, f.read_bytes()
@@ -2496,7 +3033,7 @@ def sayfa_yukle():
                 dosya_adi, icerik = dosya.name, dosya.getvalue()
 
         st.markdown(
-            "<div class='card' style='margin-top:12px;background:#faf7f2'>"
+            "<div class='card' style='margin-top:12px;background:var(--side)'>"
             "<div style='font-weight:600;font-size:13px;margin-bottom:4px'>Dosya yanlışsa ne görürsün?</div>"
             "<div class='sub'>Eksik sütun veya bozuk tarih olduğunda yükleme durur ve neyin eksik olduğu açıkça yazılır:</div>"
             "<div style='margin-top:6px;padding:8px 10px;border-radius:8px;background:#fbe3e0;color:#8f2a24;font-size:11.5px'>"
@@ -2512,11 +3049,11 @@ def sayfa_yukle():
             "Ne için": ["siparişi tanımlar", "segment ve churn", "tarih filtreleri",
                         "ürün analizleri", "kategori kırılımı", "il bazlı panel",
                         "satış ve stok", "brüt ciro", "indirim ve net ciro"],
-        }, hide_index=True, use_container_width=True)
+        }, hide_index=True, width="stretch")
 
     if icerik is not None:
         with st.status("Veri işleniyor…", expanded=True) as durum:
-            st.write("Dosya okunuyor ve kontrol ediliyor")
+            st.write("Dosya okunuyor ve kontrol ediliyor (Excel ilk seferde yaklaşık yarım dakika sürer; aynı dosya sonraki açılışlarda saniyeler içinde gelir)")
             df, atilan, hatalar, kalite = data.hazirla(dosya_adi, icerik)
             if hatalar:
                 durum.update(label="Dosya uygun değil", state="error")
@@ -2530,7 +3067,7 @@ def sayfa_yukle():
                 st.session_state["df"] = df
                 st.session_state["atilan"] = atilan
                 st.session_state["kalite"] = kalite
-                st.session_state["dosya_adi"] = dosya_adi
+                st.session_state["dosya_adi"] = f"{dosya_adi}#{hashlib.md5(icerik).hexdigest()[:10]}"
                 st.rerun()
 
     if "df" in st.session_state:
@@ -2552,8 +3089,8 @@ def sayfa_yukle():
 # ======================================================================
 def sayfa_yonetici():
     @st.cache_data(show_spinner="Tahmin hesaplanıyor…")
-    def c_baz(_m, K):
-        return an2.baz_tahmin30(_m)
+    def c_baz(_m, K, bitis):
+        return an2.baz_tahmin30(_m, bitis)
 
 
     @st.cache_data(show_spinner=False)
@@ -2574,7 +3111,8 @@ def sayfa_yonetici():
 
     tum = data.veri()
     vid = (st.session_state.get("dosya_adi", ""), len(tum))
-    ui.baslik("Yönetici Özeti", "Üç departmanın seçili dönemdeki durumu ve önümüzdeki 30 günde ne yapmalıyız?")
+    ui.baslik("Yönetici Özeti", "Üç departmanın seçili dönemdeki durumu ve önümüzdeki 30 günde ne yapmalıyız?",
+              "Aralıklar eşit uzunlukta olursa vurgu nominal değerlere, farklıysa günlük ortalamalara geçer. 1, 2, 4 ve 5. bölümler seçtiğin tarihten bağımsızdır; 3. bölüm seçtiğin tarihe göre değişir. Kategori, ürün ve şehir filtreleri hepsini etkiler.")
     m, a, b, ca, cb = ui.filtreler(tum)
     K = w.fk()
     if m.empty:
@@ -2602,7 +3140,6 @@ def sayfa_yonetici():
         w.kart("Müşteri başı ciro", ui.sayi(perC / 1000, 1) + " bin ₺", w.chg(w.rel(perC, perCc), hN), "Günlük ort.", ui.sayi(dpc) + " ₺", w.chg(w.rel(dpc, dpcc), hD), "#d9622b"),
         w.kart("Satılan adet", ui.sayi(S["q"] / 1000, 1) + " bin", w.chg(w.rel(S["q"], C["q"]), hN), "Günlük ort.", ui.sayi(S["dq"]) + " adet", w.chg(w.rel(S["dq"], C["dq"]), hD), "#3b6fd1"),
     ], "k6")
-    w.not_kutusu("Aralıklar eşit uzunlukta olursa vurgu nominal değerlere, farklıysa günlük ortalamalara geçer. 1, 2, 4 ve 5. bölümler seçtiğin tarihten bağımsızdır; 3. bölüm seçtiğin tarihe göre değişir. Kategori, ürün ve şehir filtreleri hepsini etkiler.")
 
     # ---------- 1-2 ----------
     p1, p2 = st.columns([1.9, 1])
@@ -2615,26 +3152,28 @@ def sayfa_yonetici():
             yil = st.selectbox("Yıl", yillar, index=yillar.index(bit.year), key="yon_yil")
         ay = an2.aylik(m, yil)
         if ay is None:
-            st.markdown(f"<div style='padding:60px 16px;text-align:center;background:#faf7f2;border-radius:10px;font-size:13px;color:#5b6475'><b style='color:#1f2a44'>{yil} için veri yok.</b><br>Veri seti bu yılı kapsamıyor.</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='padding:60px 16px;text-align:center;background:var(--side);border-radius:10px;font-size:13px;color:var(--muted)'><b style='color:var(--fg)'>{yil} için veri yok.</b><br>Veri seti bu yılı kapsamıyor.</div>", unsafe_allow_html=True)
         else:
             mxm = ay["net"].max()
             pk = int(ay["net"].values.argmax())
-            vl = int(ay.loc[ay["net"] > 0, "net"].values.argmin()) if (ay["net"] > 0).any() else 0
+            dolu = ay[ay["net"] > 0]
+            vl = int(dolu["net"].idxmin()) - 1 if len(dolu) else -1  # ay numarası → 0 tabanlı sıra
+            y2r = [max(0.0, dolu["disc"].min() * 100 - 2), dolu["disc"].max() * 100 + 2] if len(dolu) else [0, 50]
             renk = ["#1d6b58" if i == pk else ("#9fcfc2" if i == vl else "#3d9a84") for i in range(12)]
             fig = go.Figure()
             fig.add_bar(x=ui.AYLAR, y=ay["net"] / 1e6, marker_color=renk, name="Net ciro", customdata=np.c_[ay["net"] / 1e6, ay["disc"] * 100],
                         hovertemplate="%{x}<br>Net ciro %{customdata[0]:.2f} M ₺<br>İndirim oranı %%{customdata[1]:.1f}<extra></extra>")
-            fig.add_scatter(x=ui.AYLAR, y=ay["disc"] * 100, yaxis="y2", mode="lines+markers", line=dict(color="#e0a526", width=2), name="İndirim %",
+            fig.add_scatter(x=ui.AYLAR, y=ay["disc"].where(ay["net"] > 0) * 100, yaxis="y2", mode="lines+markers", line=dict(color="#e0a526", width=2), name="İndirim %",
                             hovertemplate="%{x}<br>İndirim %{y:.1f}%<extra></extra>")
             fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor="white", showlegend=False,
                               yaxis=dict(title="M ₺", rangemode="tozero"),
-                              yaxis2=dict(overlaying="y", side="right", range=[35, 44], showgrid=False, ticksuffix="%"))
+                              yaxis2=dict(overlaying="y", side="right", range=y2r, showgrid=False, ticksuffix="%"))
             fig.add_annotation(x=ui.AYLAR[pk], y=mxm / 1e6, text=f"zirve {ui.sayi(mxm / 1e6, 2)}", showarrow=False, yshift=12, font=dict(size=11))
             ui.plot(fig)
             tot = ay["net"].sum()
             gross = ay["gross"].sum()
             st.markdown(f"<span class='pill g'>Yıllık net ciro {ui.sayi(tot / 1e6, 2)} M ₺</span><span class='pill y'>İndirim oranı %{ui.sayi((1 - tot / gross) * 100, 1)}</span>"
-                        "<span class='pill'>Aya gel: ciro ve indirim oranı görünür</span>", unsafe_allow_html=True)
+                        "", unsafe_allow_html=True)
 
     pm = an.pareto(m, "CustomerID")
     pu = an.pareto(m, "Description")
@@ -2647,11 +3186,11 @@ def sayfa_yonetici():
             renk = {"A": "#3d9a84", "B": "#e0a526", "C": "#d9622b"}
             bar = "".join(f"<div style='flex:{max(c[k], 0.001)} 1 0;background:{renk[k]};color:#fff;font-size:12px;font-weight:700;text-align:center;padding:5px 0'>{k}</div>" for k in "ABC")
             return (f"<div style='font-weight:600;font-size:13px;margin-top:6px'>{ad} · {ui.sayi(n)}</div><div style='display:flex;border-radius:6px;overflow:hidden;margin:4px 0'>{bar}</div>"
-                    f"<div style='font-size:11px;color:#5b6475'>A {ui.sayi(c['A'])} · B {ui.sayi(c['B'])} · C {ui.sayi(c['C'])} {birim}</div>"), c, n
+                    f"<div style='font-size:11px;color:var(--muted)'>A {ui.sayi(c['A'])} · B {ui.sayi(c['B'])} · C {ui.sayi(c['C'])} {birim}</div>"), c, n
         t1, c1, n1 = seritler(pm, "Müşteriler", "müşteri")
         t2, c2, n2 = seritler(pu, "Ürünler", "ürün")
         st.markdown(t1 + t2, unsafe_allow_html=True)
-        st.markdown(f"<div style='background:#faf7f2;border-radius:10px;padding:8px 12px;font-size:12px;margin-top:10px'>Müşterilerin %{ui.sayi(c1['A'] / n1 * 100, 1)}’i, ürünlerin %{ui.sayi(c2['A'] / n2 * 100, 0)}’i cironun %80’ini getiriyor.</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='background:var(--side);border-radius:10px;padding:8px 12px;font-size:12px;margin-top:10px'>Müşterilerin %{ui.sayi(c1['A'] / n1 * 100, 1)}’i, ürünlerin %{ui.sayi(c2['A'] / n2 * 100, 0)}’i cironun %80’ini getiriyor.</div>", unsafe_allow_html=True)
 
     # ---------- 3. Departmanlar arası çıkarımlar (seçili tarihe göre) ----------
     churn, auc = w.churn_c(tum, vid)
@@ -2671,12 +3210,13 @@ def sayfa_yonetici():
               ("Satış", "Tedarik", "#d6ece5", "#dbe5f8", f"%{ui.sayi(pzt, 0)} pazartesi", "Seçili dönemde satışın bu kadarı pazartesi geliyor. Cuma gününe küçük bir indirim koyarsak depo yükü haftaya yayılır."),
               ("Tedarik", "Satış", "#dbe5f8", "#d6ece5", f"{ui.sayi(len(yavas3))} yavaş ürün", f"{et(b, b)} öncesindeki 90 günde satışı bir önceki 90 güne göre %70 ve üzeri düşen {ui.sayi(len(yavas3))} ürün var. Yanında sık alınan bir ürünle paket yapıp satabiliriz.")]
         for kol, (d1, d2, b1, b2, buyuk, txt) in zip(st.columns(3), kt):
-            kol.markdown(f"<div style='background:#faf7f2;border:1px solid #e4dfd6;border-radius:12px;padding:12px 14px;height:100%'><span class='pill' style='background:{b1}'>{d1}</span>"
+            kol.markdown(f"<div style='background:var(--side);border:1px solid var(--line);border-radius:12px;padding:12px 14px;height:100%'><span class='pill' style='background:{b1}'>{d1}</span>"
                          f"<span class='pill' style='background:{b2}'>{d2}</span><div style='font-family:Poppins;font-weight:700;font-size:20px;margin:6px 0'>{buyuk}</div>"
                          f"<div style='font-size:12px;line-height:1.5'>{txt}</div></div>", unsafe_allow_html=True)
 
     # ---------- 4. Aksiyon planı (tablo) ----------
-    baz, wape = c_baz(m, K)
+    baz, wape, bant = c_baz(m, K, str(bit.date()))
+    bz = baz if baz > 0 else 1.0
     yavas = c_yavas(m, K, str(bit.date()))
     cm = an.pareto(m, "CustomerID").join(churn[["p", "risk", "m30"]])
     pay = (m.groupby("CustomerID")["net"].sum() / tum.groupby("CustomerID")["net"].sum()).reindex(cm.index).fillna(0)
@@ -2690,31 +3230,30 @@ def sayfa_yonetici():
     tavan30 = norm_top["tavan"] * 30 / gun_say
     fiyat = m["net"].sum() / m["Quantity"].sum()
     wk_q = m.groupby("gun")["Quantity"].sum().reindex(pd.date_range(tum["gun"].min(), bit), fill_value=0)
-    haf_q = wk_q.values[: len(wk_q) // 7 * 7].reshape(-1, 7).sum(axis=1)
-    base_u = float(haf_q[-8:].mean())
-    kapasite = float(haf_q.max())
+    haf_q = wk_q.values[len(wk_q) % 7:].reshape(-1, 7).sum(axis=1)  # en yeni günler korunur
+    base_u = float(haf_q[-8:].mean()) if len(haf_q) else 0.0
+    kapasite = max(1.0, float(haf_q.max())) if len(haf_q) else 1.0
     bitis30 = bit + pd.Timedelta(days=30)
     ss = st.session_state
     sa, sb, sc, sd = ss.get("ak_a", 25), ss.get("ak_b", 8), ss.get("ak_c", 15), ss.get("ak_d", 50)
     onA, onB, onC, onD = (ss.get(k, True) for k in ("ak_a_on", "ak_b_on", "ak_c_on", "ak_d_on"))
-    oran = (1 - yavas["d"] - sb / 100) / (1 - yavas["d"])
-    qa = yavas["q90"] * (oran ** -2.2 - 1)
-    gA = hiAB["m30"].sum() * sa / 100
-    gB = float((qa * yavas["pr"] * oran).sum()) / 3
-    uB = float(qa.sum()) / 3
-    gC = cOK["m30"].sum() * sc / 100
+    kA = float((hiAB["m30"] * hiAB["p"]).sum())  # beklenen kayıp = aylık ciro × bırakma olasılığı
+    kC = float((cOK["m30"] * cOK["p"]).sum())
+    gA = kA * sa / 100
+    gB, uB = an2.paket_etkisi(yavas, sb)
+    gC = kC * sc / 100
     gD = tavan30 * sd / 100
     en_buyuk = hiAB.sort_values("m30", ascending=False).head(2)
     musteri_txt = " ve ".join(f"<b>{i}</b> ({ui.tl(r['m30'])})" for i, r in en_buyuk.iterrows())
     kat2 = " ve ".join(norm_kat.index[:2].tolist()) or "ilgili kategoriler"
     PLAN = [
-        ("Pazarlama", f"Bırakma riski yüksek {ui.sayi(len(hiAB))} büyük (A/B) müşteri var" + (f"; en büyükleri {musteri_txt}" if musteri_txt else "") + f". Bırakırlarsa gelecek ay ≈ {ui.tl(hiAB['m30'].sum())} kaybederiz.",
+        ("Pazarlama", f"Bırakma riski yüksek {ui.sayi(len(hiAB))} büyük (A/B) müşteri var" + (f"; en büyükleri {musteri_txt}" if musteri_txt else "") + f". Beklenen aylık kayıp (aylık ciro × bırakma olasılığı) ≈ {ui.tl(kA)}.",
          "Müşteri temsilcisi ile doğrudan telefon/ziyaret ve özel geri kazanım sepeti.", gA, onA, "Ciro koruma", ("KRİTİK (Bu hafta)", "r")),
-        ("Satış & Fiyat", f"<b>{ui.sayi(norm_top['asan_siparis'])} siparişte</b> kategori medyanından 10+ puan fazla indirim ({kat2} başta). Fazlası ≈ {ui.tl(norm_top['fazla'])}.",
+        ("Satış & Fiyat", f"<b>{ui.sayi(norm_top['asan_siparis'])} siparişte</b> normdan (aynı kategori, benzer sipariş büyüklüğü) 10+ puan fazla indirim ({kat2} başta). Fazlası ≈ {ui.tl(norm_top['fazla'])}.",
          "ERP'de kategori bazlı otomatik indirim tavanı (+5 puan üstü yönetici onayı).", gD, onD, "Doğrudan brüt kâr", ("KRİTİK (Bu hafta)", "r")),
-        ("Tedarik", f"{ui.sayi(len(yavas))} ürünün satışı son 90 günde %70+ düştü; <b>{ui.sayi(a_say)} A sınıfı üründen {ui.sayi(az_say)} tanesi</b> düzensiz talepli (stok riski).",
+        ("Tedarik", f"{ui.sayi(len(yavas))} ürünün satışı son 90 günde %70+ düştü; <b>adet bazlı {ui.sayi(a_say)} A sınıfı üründen {ui.sayi(az_say)} tanesi</b> düzensiz talepli (stok riski).",
          "%95 hizmet seviyesiyle otomatik sipariş noktası; yavaş ürünleri hızlı ürünlerle ikili paket yap.", gB, onB, "Ek ciro", ("YÜKSEK (15 gün)", "y")),
-        ("CRM / Satış", f"Yeni müşterilerin <b>%{ui.sayi(100 - (KG[1] or 0), 0)}’i</b> ilk siparişten sonraki çeyrekte tekrar sipariş vermedi; {ui.sayi(len(cOK))} küçük müşteride bırakma riski var.",
+        ("CRM / Satış", f"Yeni müşterilerin <b>%{ui.sayi(100 - KG[1], 0) if KG[1] is not None else '–'}’i</b> ilk siparişten sonraki çeyrekte tekrar sipariş vermedi; {ui.sayi(len(cOK))} küçük müşteride bırakma riski var.",
          "İlk faturadan 30–45 gün sonra otomatik “Birlikte alınanlar” çapraz kategori teklifi ve kupon.", gC, onC, "Ek ciro", ("ORTA (30 gün)", "g")),
     ]
     with st.container(border=True):
@@ -2723,7 +3262,7 @@ def sayfa_yonetici():
         for birim, sorun, aksiyon_txt, g, on, alt, (oc_, oc_k) in PLAN:
             satir.append([f"<span style='display:inline-block;background:#1f2a44;color:#fff;border-radius:999px;padding:4px 12px;font-size:12px;font-weight:600;white-space:nowrap'>{birim}</span>",
                           sorun, aksiyon_txt,
-                          f"<b style='color:{'#14513f' if on else '#9aa3b2'}'>{'+' + ui.tl(g) if on else 'Planda değil'}</b><div style='font-size:11px;color:#5b6475'>{alt}</div>",
+                          f"<b style='color:{'#14513f' if on else '#9aa3b2'}'>{'+' + ui.tl(g) if on else 'Planda değil'}</b><div style='font-size:11px;color:var(--muted)'>{alt}</div>",
                           f"<span class='pill {oc_k}'>{oc_}</span>"])
         st.markdown(w.tablo(["BİRİM", "TESPİT EDİLEN KÖK SORUN", "ÖNERİLEN SOMUT AKSİYON", "HEDEF / FİNANSAL ETKİ", "ÖNCELİK"], satir), unsafe_allow_html=True)
 
@@ -2743,49 +3282,47 @@ def sayfa_yonetici():
         with k4:
             sc = st.slider("Kuponu kullanan oranı (%)", 0, 40, 15, key="ak_c")
             onC = st.toggle("Planda", value=True, key="ak_c_on")
-        gA = hiAB["m30"].sum() * sa / 100
+        gA = kA * sa / 100
         gD = tavan30 * sd / 100
-        oran = (1 - yavas["d"] - sb / 100) / (1 - yavas["d"])
-        qa = yavas["q90"] * (oran ** -2.2 - 1)
-        gB = float((qa * yavas["pr"] * oran).sum()) / 3
-        uB = float(qa.sum()) / 3
-        gC = cOK["m30"].sum() * sc / 100
+        gB, uB = an2.paket_etkisi(yavas, sb)
+        gC = kC * sc / 100
         tot = (gA if onA else 0) + (gB if onB else 0) + (gC if onC else 0) + (gD if onD else 0)
         WK = 30 / 7
         ek_u = ((gA / fiyat if onA else 0) + (uB if onB else 0) + (gC / fiyat if onC else 0)) / WK
         util = (base_u + ek_u) / kapasite * 100
         fig = go.Figure()
         fig.add_bar(y=["Bir şey yapmazsak"], x=[baz / 1e6], orientation="h", marker_color="#d4cdbf", name="Tahmin", showlegend=False,
-                    hovertemplate=f"<b>Bir şey yapmazsak</b><br>{ui.tl(baz)}<br>Tahmin aralığı: {ui.tl(baz * (1 - wape))} – {ui.tl(baz * (1 + wape))}<extra></extra>")
+                    hovertemplate=f"<b>Bir şey yapmazsak</b><br>{ui.tl(baz)}<br>%80 tahmin aralığı: {ui.tl(baz * (1 - bant))} – {ui.tl(baz * (1 + bant))}<extra></extra>")
         fig.add_bar(y=["Aksiyonlarla"], x=[baz / 1e6], orientation="h", marker_color="#d4cdbf", name="Tahmin", showlegend=False, hoverinfo="skip")
         for ad, g, on, rn in (("Büyük müşterileri ara", gA, onA, "#d9622b"), ("İndirim tavanı", gD, onD, "#1f2a44"), ("Yavaş ürünleri paketle", gB, onB, "#3d9a84"), ("Kupon gönder", gC, onC, "#e0a526")):
             if on:
                 fig.add_bar(y=["Aksiyonlarla"], x=[g / 1e6], orientation="h", marker_color=rn, name=ad,
-                            hovertemplate=f"<b>{ad}</b><br>Ek getiri: +{ui.tl(g)}<br>Tahmine göre: +%{ui.sayi(g / baz * 100, 1)}<extra></extra>")
+                            hovertemplate=f"<b>{ad}</b><br>Ek getiri: +{ui.tl(g)}<br>Tahmine göre: +%{ui.sayi(g / bz * 100, 1)}<extra></extra>")
         fig.add_annotation(x=baz / 1e6, y="Bir şey yapmazsak", text=f"{ui.sayi(baz / 1e6, 2)} M ₺", showarrow=False, xanchor="left", xshift=6, font=dict(size=12))
-        fig.add_annotation(x=(baz + tot) / 1e6, y="Aksiyonlarla", text=f"{ui.sayi((baz + tot) / 1e6, 2)} M ₺ (+%{ui.sayi(tot / baz * 100, 1)})", showarrow=False, xanchor="left", xshift=6, font=dict(size=12))
-        fig.add_vrect(x0=baz * (1 - wape) / 1e6, x1=baz * (1 + wape) / 1e6, fillcolor="rgba(31,42,68,.08)", line_width=0, layer="below")
+        fig.add_annotation(x=(baz + tot) / 1e6, y="Aksiyonlarla", text=f"{ui.sayi((baz + tot) / 1e6, 2)} M ₺ (+%{ui.sayi(tot / bz * 100, 1)})", showarrow=False, xanchor="left", xshift=6, font=dict(size=12))
+        fig.add_vrect(x0=baz * (1 - bant) / 1e6, x1=baz * (1 + bant) / 1e6, fillcolor="rgba(31,42,68,.08)", line_width=0, layer="below")
         fig.update_layout(barmode="stack", height=190, margin=dict(l=0, r=0, t=26, b=24), showlegend=True, plot_bgcolor="white",
                           legend=dict(orientation="h", y=1.22, x=0, font=dict(size=11)),
-                          xaxis=dict(range=[0, baz * 1.45 / 1e6], ticksuffix=" M"), yaxis=dict(autorange="reversed"))
+                          xaxis=dict(range=[0, max(baz * (1 + bant), baz + tot, 1.0) * 1.3 / 1e6], ticksuffix=" M"), yaxis=dict(autorange="reversed"))
         r1, r2 = st.columns([2, 1])
         with r1:
             ui.plot(fig)
-            st.caption(f"Gölge alan: tahmin ±%{ui.sayi(wape * 100, 0)} oynayabilir. Çubuğun üzerine gelince değerleri görürsün.")
+            st.caption(f"Gölge alan: %80 tahmin aralığı (±%{ui.sayi(bant * 100, 0)}). Varsayımlar: aksiyon getirisi = beklenen kayıp × oran (müşteri zaten alacaksa sayılmaz); "
+                       f"paket için fiyat esnekliği {ui.sayi(an2.ESNEKLIK, 1)}; norm üstü indirim kesilince hacmin değişmediği varsayılır (fiyat kaçağı); kupon maliyeti dahil değil.")
         with r2:
             st.markdown(f"<div class='out'><div class='t'>Aksiyonlardan beklenen ek getiri</div><div class='v'>+{ui.tl(tot)} "
-                        f"<span class='chg {'pos' if tot > 0 else 'mute'}' style='font-size:11px'>+%{ui.sayi(tot / baz * 100, 1)}</span></div></div>"
-                        f"<div style='margin-top:6px'><span class='pill' style='background:{'#fbe3e0' if util > 100 else ('#fdf0cf' if util > 90 else '#d6ece5')}'>Stok kapasitesi %{ui.sayi(util, 0)} dolu</span></div>"
+                        f"<span class='chg {'pos' if tot > 0 else 'mute'}' style='font-size:11px'>+%{ui.sayi(tot / bz * 100, 1)}</span></div></div>"
+                        f"<div style='margin-top:6px'><span class='pill' style='background:{'#fbe3e0' if util > 100 else ('#fdf0cf' if util > 90 else '#d6ece5')}'>Geçmiş en yoğun haftaya göre yük %{ui.sayi(util, 0)}</span></div>"
                         f"<div style='font-size:12px;margin-top:6px'>Hiçbir şey yapmazsan: <b>{ui.tl(baz)}</b><br>Aksiyonlarla: <b>{ui.tl(baz + tot)}</b></div>", unsafe_allow_html=True)
 
-    # ---------- RafBot ----------
+    # ---------- Akıllı Asistan ----------
     aksiyon = sorted([("Büyük müşterileri ara", gA if onA else 0), ("İndirim tavanı", gD if onD else 0), ("Yavaş ürünleri paketle", gB if onB else 0), ("Küçük müşterilere kupon gönder", gC if onC else 0)], key=lambda x: -x[1])[0]
     bilgi = {
-        "ciro": f"Önümüzdeki 30 gün için baz tahmin ≈ {ui.tl(baz)}. Geriye dönük testte ortalama hata ≈ %{ui.sayi(wape * 100, 0)}, yani tahmin ±{ui.tl(baz * wape)} aralığında okunmalı.",
+        "ciro": f"Önümüzdeki 30 gün için baz tahmin ≈ {ui.tl(baz)} (%80 aralık {ui.tl(baz * (1 - bant))} – {ui.tl(baz * (1 + bant))}). Geriye dönük testte 4 haftalık hata %{ui.sayi(wape * 100, 0)}.",
         "kopru": f"Net ciro {et(a, b)} döneminde {ui.tl(S['net'])}; karşılaştırma döneminden %{ui.sayi(abs(w.rel(S['net'], C['net']) * 100), 1)} {'fazla' if S['net'] >= C['net'] else 'az'}.",
-        "churn": f"{ui.sayi(len(hiAB))} büyük müşteri yüksek riskli; bırakırlarsa gelecek ay ≈ {ui.tl(hiAB['m30'].sum())} kaybederiz. Önce bunları ara.",
+        "churn": f"{ui.sayi(len(hiAB))} büyük müşteri yüksek riskli; beklenen aylık kayıp ≈ {ui.tl(kA)}. Önce bunları ara.",
         "segment": f"Müşterilerin %{ui.sayi(c1['A'] / n1 * 100, 1)}’i, ürünlerin %{ui.sayi(c2['A'] / n2 * 100, 0)}’i cironun %80’ini getiriyor.",
-        "indirim": f"Şu anki ayarlarla en çok getiren aksiyon “{aksiyon[0]}” (+{ui.tl(aksiyon[1])}). Dördünün toplamı +{ui.tl(tot)}, yani tahminin %{ui.sayi(tot / baz * 100, 1)}’i.",
+        "indirim": f"Şu anki ayarlarla en çok getiren aksiyon “{aksiyon[0]}” (+{ui.tl(aksiyon[1])}). Dördünün toplamı +{ui.tl(tot)}, yani tahminin %{ui.sayi(tot / bz * 100, 1)}’i.",
         "gun": f"Cironun %{ui.sayi(pzt, 0)}’i pazartesi geliyor.", "birlikte": None,
     }
     chat.rafbot(bilgi)
@@ -2882,7 +3419,8 @@ def sayfa_satis():
 
     tum = data.veri()
     vid = (st.session_state.get("dosya_adi", ""), len(tum))
-    ui.baslik("Satış & Fiyat", "Ne zaman, kime, hangi ürünü, hangi indirimle satmalıyız?")
+    ui.baslik("Satış & Fiyat", "Ne zaman, kime, hangi ürünü, hangi indirimle satmalıyız?",
+              "Aralıklar eşit uzunlukta olursa (ör. 10 gün – 10 gün) vurgu nominal değerlere geçer. Aralıklar farklıysa (ör. 10 gün – 1 ay) günlük ortalamalar kıyaslanır.")
     m, a, b, ca, cb = ui.filtreler(tum)
     fk = (vid, st.session_state.get("f_kat"), st.session_state.get("f_urun"), st.session_state.get("f_sehir"))
 
@@ -2897,7 +3435,7 @@ def sayfa_satis():
     et = ui.tarih_etiketi
 
     st.markdown(
-        f"<span class='pill g'>Seçili: {et(a, b)} · {S['gun']} gün</span><span style='font-size:12px;color:#5b6475'>karşılaştırma</span> "
+        f"<span class='pill g'>Seçili: {et(a, b)} · {S['gun']} gün</span><span style='font-size:12px;color:var(--muted)'>karşılaştırma</span> "
         f"<span class='pill'>{et(ca, cb)} · {C['gun']} gün</span>"
         f"<span class='pill y'>{'Aralıklar eşit uzunlukta: vurgulu fark nominal değerlere göre' if ayni else 'Aralık uzunlukları farklı: vurgulu fark günlük ortalamaya göre'}</span>"
         "<div class='kgrid'>" +
@@ -2911,8 +3449,7 @@ def sayfa_satis():
              ui.sayi(S["dbt"], 1) + " ₺", chg(rel(S["dbt"], C["dbt"]), hD)) +
         kart("İndirim oranı", "%" + ui.sayi(S["disc"] * 100, 1), chg_p(S["disc"] - C["disc"], hN), "Günlük ort.",
              "%" + ui.sayi(S["dd"] * 100, 1), chg_p(S["dd"] - C["dd"], hD), sari=True) +
-        "</div><p class='sub'>Aralıklar eşit uzunlukta olursa (ör. 10 gün – 10 gün) vurgu nominal değerlere geçer. "
-        "Aralıklar farklıysa (ör. 10 gün – 1 ay) günlük ortalamalar kıyaslanır.</p>", unsafe_allow_html=True)
+        "</div>", unsafe_allow_html=True)
 
     # ---------- 1. Günlük ciro neden değişti? ----------
     ef = [v / 1000 for v in an.kopru(S, C)]
@@ -2934,7 +3471,7 @@ def sayfa_satis():
         s1, s2 = st.columns([3, 2])
         with s1:
             fig = go.Figure(go.Bar(
-                y=[f"{n}<br><span style='font-size:10px;color:#5b6475'>{s}</span>" for n, s in zip(adlar, altlar)],
+                y=[f"{n}<br><span style='font-size:11.5px;color:var(--muted)'>{s}</span>" for n, s in zip(adlar, altlar)],
                 x=ef, orientation="h", marker_color=[ui.RENK["kirmizi"] if v < 0 else ui.RENK["yesil"] for v in ef],
                 text=[f"{ui.isaret(v, 1)} bin ₺" for v in ef], textposition="outside", cliponaxis=False,
                 hovertemplate="%{y}: %{text} günlük ciro etkisi<extra></extra>"))
@@ -2946,7 +3483,7 @@ def sayfa_satis():
             fig.update_layout(height=300, margin=dict(l=10, r=10, t=6, b=0), plot_bgcolor="white")
             ui.plot(fig)
         with s2:
-            yil_hizi = tum["net"].sum() / ((tum["gun"].max() - tum["gun"].min()).days + 1)
+            yil_hizi = m["net"].sum() / ((m["gun"].max() - m["gun"].min()).days + 1)
             st.markdown(f"<div class='out'><div class='t'>Bu hızla sürerse (30 gün)</div><div class='v'>{ui.sayi(S['dnet'] * 30 / 1e6, 2)} M ₺</div>"
                         f"<div class='t'>veri ortalaması hızı: {ui.sayi(yil_hizi * 30 / 1e6, 2)} M ₺ · tahmin değil, hız çarpımı</div></div>",
                         unsafe_allow_html=True)
@@ -2980,8 +3517,8 @@ def sayfa_satis():
             Kr = Nr - Cc * Gr
             dk = st.slider(f"Hedef kâr (₺) · karşılaştırma: {ui.sayi(Kr)}", -50, 100, 0, format="%d%%", key="plan_k")
             st.caption(f"Liste fiyatı {ui.sayi(L, 2)} ₺ · hedef satış {ui.sayi(Qr * (1 + dq / 100))} adet · "
-                       f"hedef ciro {ui.sayi(Nr * (1 + dc / 100))} ₺ · hedef kâr {ui.sayi(Kr * (1 + dk / 100))} ₺")
-        tq, tc, tk = Qr * (1 + dq / 100), Nr * (1 + dc / 100), Kr * (1 + dk / 100)
+                       f"hedef ciro {ui.sayi(Nr * (1 + dc / 100))} ₺ · hedef kâr {ui.sayi(Kr + abs(Kr) * dk / 100)} ₺")
+        tq, tc, tk = Qr * (1 + dq / 100), Nr * (1 + dc / 100), Kr + abs(Kr) * dk / 100
         yeni = 1 - (tc / tq) / L if tq > 0 and L > 0 else 0
         kar = tc - Cc * L * tq
         nedenler = []
@@ -3030,7 +3567,7 @@ def sayfa_satis():
             en = np.unravel_index(np.argmax(hk.values), hk.shape)
             en_gun = ["pazartesiye", "salıya", "çarşambaya", "perşembeye", "cumaya", "cumartesiye", "pazara"][en[1]]
             gun_cum = (f"Cironun %{ui.sayi(pay.max(), 0)}'i {['pazartesi', 'salı', 'çarşamba', 'perşembe', 'cuma', 'cumartesi', 'pazar'][int(pay.idxmax())]} günü, "
-                       f"%{ui.sayi(pay[5] + pay[6], 1)}'si hafta sonu. {hk.index[en[0]]} {en_gun} yığılmış (%{ui.sayi(hk.values[en], 1)}). "
+                       f"%{ui.sayi(pay[5] + pay[6], 1)}'si hafta sonu. " + (f"{hk.index[en[0]]} cirosunun %{ui.sayi(hk.values[en], 1)}'i {en_gun} yığılmış. " if gos == "Ciro payı" else f"En yoğun hücre: {hk.index[en[0]]} siparişleri {en_gun} ({ui.sayi(hk.values[en])} sipariş). ") +
                        "Veride saat bilgisi yok, yalnız gün var.")
             st.caption(gun_cum)
 
@@ -3049,7 +3586,7 @@ def sayfa_satis():
                     st.write("Çift bulunamadı.")
                 if liste:
                     st.markdown("<ol class='lst'>" + "".join(
-                        f"<li><b>{c['a']} + {c['b']}</b><br><small>{c['n']} sipariş · %{ui.sayi(c['oran'] * 100, 0)}</small></li>"
+                        f"<li><b>{c['a']} + {c['b']}</b><br><small>{c['n']} sipariş · %{ui.sayi(c['oran'] * 100, 0)} · lift {ui.sayi(c['lift'], 1)}</small></li>"
                         for c in liste) + "</ol>", unsafe_allow_html=True)
         st.markdown(f"**Seçilen tarihte best seller'lar ve en çok birlikte alındıkları ürün · {et(a, b)}**")
         if cok.empty:
@@ -3059,9 +3596,9 @@ def sayfa_satis():
             g["Birlikte alma oranı"] = g["Birlikte alma oranı"].map(lambda v: f"%{ui.sayi(v * 100, 0)}")
             g["#"] = g["#"].astype(str)
             g["Adet"] = g["Adet"].map(ui.sayi)
-            st.dataframe(g, hide_index=True, use_container_width=True)
+            st.dataframe(g, hide_index=True, width="stretch")
         st.caption("Birlikte alma oranı: best seller'ı alan siparişlerin yüzde kaçında bu ürün de var. "
-                   "Sepette best seller varsa ikinci ürün öneri olarak gösterilir.")
+                   "Sepette best seller varsa ikinci ürün öneri olarak gösterilir. Lift: çiftin birlikte görülme sıklığı ÷ tesadüfen beklenen; yalnız 1'den büyük olanlar listelenir.")
 
     # ---------- 5-6. Pareto ve kampanya ----------
     _sk, _ = st.columns([1, 2])
@@ -3071,7 +3608,7 @@ def sayfa_satis():
     birim = "Müşteri" if musteri_mi else "Ürün"
     tip = "musteri" if musteri_mi else "urun"
     pc = an.pareto(mr, anahtar)
-    churn, auc = c_churn(tum, vid)
+    churn, auc = w.churn_c(tum, vid)
     if pc.empty:
         st.info("Bu aralıkta satış yok.")
         st.stop()
@@ -3171,7 +3708,7 @@ def sayfa_satis():
             sat[0].markdown(f"<div style='padding-top:10px;font-size:13px'>{SEG_AD[sg]}</div>", unsafe_allow_html=True)
             for i, rk in enumerate(RISKLER):
                 adet = int(((cm["seg"] == sg) & (cm["risk"] == rk)).sum())
-                if sat[i + 1].button(str(adet), key=f"hm_{sg}_{RK[rk]}", use_container_width=True):
+                if sat[i + 1].button(str(adet), key=f"hm_{sg}_{RK[rk]}", width="stretch"):
                     ss["hm"] = (sg, rk)
                     st.rerun()
         toplam_net = cm["net"].sum()
@@ -3212,7 +3749,7 @@ def sayfa_satis():
             sapma = st.selectbox("Sapma türü", ["İndirime göre sapanlar", "Hacme göre sapanlar"], key="sup_tur")
         tkey = "indirim" if sapma.startswith("İndirim") else "hacim"
         sup, n_ind, kayip = c_supheli(tum, m, fk, a, b, tkey)
-        st.markdown(f"<span class='pill r'>{ui.sayi(n_ind)} sipariş-kategoride kategori medyanından 10+ puan fazla indirim</span>"
+        st.markdown(f"<span class='pill r'>{ui.sayi(n_ind)} sipariş-kategoride normdan (aynı kategori, benzer sipariş büyüklüğü) 10+ puan fazla indirim</span>"
                     f"<span class='pill y'>Toplam fazla indirim ≈ {ui.tl(kayip)}</span>", unsafe_allow_html=True)
         if sup.empty:
             st.info("Bu aralıkta bu türde şüpheli sipariş yok.")
@@ -3220,18 +3757,18 @@ def sayfa_satis():
             if tkey == "indirim":
                 tb = pd.DataFrame({"Sipariş": sup["InvoiceNo"], "Müşteri": sup["musteri"], "Kategori": sup["Category"],
                                    "İndirim": sup["indirim"].map(lambda v: f"%{ui.sayi(v * 100, 0)}"),
-                                   "Kategori medyan indirimi": sup["md"].map(lambda v: f"%{ui.sayi(v * 100, 0)}"),
+                                   "Norm indirim (kategori × hacim)": sup["md"].map(lambda v: f"%{ui.sayi(v * 100, 0)}"),
                                    "Sapma": sup["sapma"].map(lambda v: f"+{ui.sayi(v * 100, 0)} puan"),
                                    "Fazla indirim (₺)": sup["fazla"].round(0)})
             else:
                 tb = pd.DataFrame({"Sipariş": sup["InvoiceNo"], "Müşteri": sup["musteri"], "Kategori": sup["Category"],
                                    "Adet": sup["q"], "Kategori medyan adedi": sup["mq"].round(0),
                                    "Katı": sup["qr"].map(lambda v: f"{ui.sayi(v, 0)}x"), "Net ciro (₺)": sup["n"].round(0)})
-            st.dataframe(tb.head(10), hide_index=True, use_container_width=True)
+            st.dataframe(tb.head(10), hide_index=True, width="stretch")
             st.download_button("Excel'e aktar", ui.xlsx(tb, "Şüpheli siparişler"), file_name=f"supheli_siparisler_{tkey}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
-    # ---------- RafBot ----------
+    # ---------- Akıllı Asistan ----------
     yuksek = cm[cm["risk"] == "Yüksek"]
     a_yuk = cm[(cm["seg"] == "A") & (cm["risk"] == "Yüksek")]
     bilgi = {
@@ -3242,7 +3779,7 @@ def sayfa_satis():
         "segment": (f"Müşteriler ciroya göre üç gruba ayrıldı: A {ui.sayi(sayilar['A'])} (cironun %{ui.sayi(paylar['A'] * 100, 0)}'i), "
                     f"B {ui.sayi(sayilar['B'])} (%{ui.sayi(paylar['B'] * 100, 0)}), C {ui.sayi(sayilar['C'])} (%{ui.sayi(paylar['C'] * 100, 0)})."
                     if musteri_mi else f"Ürünler üç gruba ayrıldı: A {ui.sayi(sayilar['A'])}, B {ui.sayi(sayilar['B'])}, C {ui.sayi(sayilar['C'])} ürün."),
-        "indirim": (f"Seçili dönemde ağırlıklı indirim oranı %{ui.sayi(S['disc'] * 100, 1)}. {ui.sayi(n_ind)} sipariş-kategoride kategori medyanından "
+        "indirim": (f"Seçili dönemde ağırlıklı indirim oranı %{ui.sayi(S['disc'] * 100, 1)}. {ui.sayi(n_ind)} sipariş-kategoride normdan (aynı kategori, benzer büyüklük) "
                     f"10+ puan fazla indirim verilmiş; toplam fazlası ≈ {ui.tl(kayip)}."),
         "birlikte": (f"En sık birlikte alınan çift {cift[0]['a']} + {cift[0]['b']} ({cift[0]['n']} sipariş). Ortalama sepet "
                      f"{ui.sayi(S['basket'], 1)} ₺ ve {ui.sayi(S['b'], 1)} adet.") if cift else None,
@@ -3259,7 +3796,8 @@ def sayfa_satis():
 def sayfa_pazarlama():
     tum = data.veri()
     vid = (st.session_state.get("dosya_adi", ""), len(tum))
-    ui.baslik("Pazarlama & Müşteri", "Hangi müşteriye, hangi ürünle, ne zaman gitmeliyiz?")
+    ui.baslik("Pazarlama & Müşteri", "Hangi müşteriye, hangi ürünle, ne zaman gitmeliyiz?",
+              "Tüm paneller seçtiğin tarihlere göre hesaplanır. Yalnız 2. panel (aylar arası tekrar alım) seçtiğin yılın tamamını gösterir.")
     m, a, b, ca, cb = ui.filtreler(tum)
     K = w.fk()
     if m.empty:
@@ -3283,7 +3821,6 @@ def sayfa_pazarlama():
         w.kart("Net ciro", ui.sayi(S["net"] / 1e6, 2) + " M ₺", w.chg(w.rel(S["net"], C["net"]), hN), "Günlük ort.", ui.sayi(S["dnet"] / 1000, 1) + " bin ₺", w.chg(w.rel(S["dnet"], C["dnet"]), hD)),
         w.kart("Müşteri başı ciro", ui.sayi(perC / 1000, 1) + " bin ₺", w.chg(w.rel(perC, perCc), hN), "Günlük ort.", ui.sayi(dpc) + " ₺", w.chg(w.rel(dpc, dpcc), hD), "#e0a526"),
     ])
-    w.not_kutusu("Tüm paneller seçtiğin tarihlere göre hesaplanır. Yalnız 2. panel (aylar arası tekrar alım) seçtiğin yılın tamamını gösterir.")
 
     # ---------- 1. Müşteri tabanı değişimi ----------
     net = ch["aS"] - ch["aC"]
@@ -3297,7 +3834,7 @@ def sayfa_pazarlama():
             ad = ["Kaybedilen", "Yeni", "Geri dönen", "Net değişim"]
             al = ["karşılaştırmada aldı, şimdi almadı", "ilk alımı bu dönemde", "daha önce almış, karşılaştırmada almamış", "aktif müşteri farkı"]
             mxa = max([abs(x) for x in v] + [1])
-            fig = go.Figure(go.Bar(y=[f"{x}<br><span style='font-size:10px;color:#5b6475'>{y}</span>" for x, y in zip(ad, al)], x=v, orientation="h",
+            fig = go.Figure(go.Bar(y=[f"{x}<br><span style='font-size:11.5px;color:var(--muted)'>{y}</span>" for x, y in zip(ad, al)], x=v, orientation="h",
                                    marker_color=[ui.RENK["kirmizi"] if x < 0 else ui.RENK["yesil"] for x in v],
                                    text=[("+" if x >= 0 else "−") + ui.sayi(abs(x)) for x in v], textposition="outside", cliponaxis=False))
             fig.update_yaxes(autorange="reversed", automargin=True)
@@ -3323,7 +3860,7 @@ def sayfa_pazarlama():
             o1, o2, o3 = st.columns(3)
             o1.markdown(f"<div class='out'><div class='t'>İlk siparişten sonraki çeyrekte sipariş verenler</div><div class='v'>%{ui.sayi(KG[1], 0)}</div></div>", unsafe_allow_html=True)
             o2.markdown(f"<div class='out'><div class='t'>İlk siparişten sonra 2. çeyrekte tekrar sipariş verenler</div><div class='v'>{'%' + ui.sayi(KG[2], 0) if KG[2] is not None else '–'}</div></div>", unsafe_allow_html=True)
-            en = max((x for x in KS if x[2][0] is not None), key=lambda x: x[2][0])
+            en = max((x for x in KS if x[2][0] is not None and not x[0].endswith("*")), key=lambda x: x[2][0], default=KS[0])
             o3.markdown(f"<div class='out'><div class='t'>En iyi kohort (1. çeyrek sonrası)</div><div class='v'>{en[0]} · %{ui.sayi(en[2][0], 0)}</div></div>", unsafe_allow_html=True)
             tip = w.info("Satır: ilk siparişini o çeyrekte veren müşteriler. Sütun: bu müşterilerin ilk siparişten 1, 2 ve 3 çeyrek sonra, o çeyrekte en az bir sipariş verenlerin yüzdesi. Boş hücre: veri henüz o çeyreğe ulaşmıyor.")
             h = (f"<table class='t' style='margin-top:10px'><thead><tr><th>İlk sipariş çeyreği{tip}</th><th class='r'>İlk kez sipariş veren</th>"
@@ -3338,7 +3875,7 @@ def sayfa_pazarlama():
                         h += f"<td style='text-align:center;font-weight:600;background:{w.mix('#f6f3ee', '#2f8a73', min(1, v / 60))};color:{'#fff' if v > 38 else '#1f2a44'}'>%{ui.sayi(v, 0)}</td>"
                 h += "</tr>"
             st.markdown(h + "</tbody></table>", unsafe_allow_html=True)
-            st.caption("Veri 2 Ocak 2020’de başladığı için Ç1 kohortu, o tarihte zaten müşteri olanları da içerir; bu yüzden diğer kohortlardan yüksek çıkabilir.")
+            st.caption("* Verinin başladığı çeyrekteki kohort, o tarihte zaten müşteri olanları da içerir (sol-sansürlü); bu yüzden ortalamalara ve en iyi kohort seçimine katılmaz.")
 
     # ---------- 3. RFM ----------
     rf, onceden = an2.rfm(tum, m, a, b)
@@ -3362,8 +3899,8 @@ def sayfa_pazarlama():
                     g += (f"<div style='background:{an2.SEG_RENK[sg]};color:{an2.SEG_YAZI[sg]};border-radius:6px;min-height:46px;display:flex;flex-direction:column;"
                           f"align-items:center;justify-content:center;line-height:1.15' title='{an2.SEG_AD[sg]}: {harita[r][c]} müşteri'>"
                           f"<b style='font-size:13px'>{harita[r][c]}</b><span style='font-size:9px;opacity:.85'>müşteri</span></div>")
-            g += "</div><div style='font-size:11px;color:#5b6475;text-align:center;margin-top:4px'>son sipariş: eski → yeni · satırlar: sipariş sıklığı ve ciro, yüksek üstte</div>" \
-                 "<div style='font-size:11px;color:#5b6475;text-align:center'>Kutudaki sayı: müşteri adedi · renk: segment</div>"
+            g += "</div><div style='font-size:11px;color:var(--muted);text-align:center;margin-top:4px'>son sipariş: eski → yeni · satırlar: sipariş sıklığı ve ciro, yüksek üstte</div>" \
+                 "<div style='font-size:11px;color:var(--muted);text-align:center'>Kutudaki sayı: müşteri adedi · renk: segment</div>"
             st.markdown(g, unsafe_allow_html=True)
         with s2:
             satir = []
@@ -3374,7 +3911,7 @@ def sayfa_pazarlama():
                               f"%{ui.sayi(net_seg[i] / net_top * 100, 1)}" if i < 6 else "–"])
             satir.append(["<b>Tüm müşteriler</b>", f"<b>{ui.sayi(len(rf) + len(onceden))}</b>", "", ""])
             st.markdown(w.tablo(["Segment", "Müşteri adedi", "Müşteri payı", "Ciro payı"], satir, sag=(1, 2, 3)), unsafe_allow_html=True)
-        sec = st.selectbox("Excel için segment", ["Tüm müşteriler"] + an2.SEG_AD[:6], key="rfm_sec")
+        sec = st.selectbox("Excel’e indirmek için segment seçiniz", ["Tüm müşteriler"] + an2.SEG_AD[:6], key="rfm_sec")
         secim = rf if sec == "Tüm müşteriler" else rf[rf["seg"] == an2.SEG_AD.index(sec)]
         cr = an.araliga_kes(m, ca, cb).groupby("CustomerID").agg(cs=("InvoiceNo", "nunique"), cn=("net", "sum"))
         ilk_t = tum.groupby("CustomerID")["gun"].min()
@@ -3416,9 +3953,9 @@ def sayfa_pazarlama():
             if not t:
                 continue
             bars += (f"<div style='display:grid;grid-template-columns:150px minmax(0,1fr) 40px;gap:8px;align-items:center;padding:4px 0;font-size:12px'><span>{an2.SEG_AD[i]}</span>"
-                     "<div style='display:flex;height:20px;border-radius:5px;overflow:hidden;background:#f0ebe2'>" +
+                     "<div style='display:flex;height:20px;border-radius:5px;overflow:hidden;background:var(--track)'>" +
                      "".join(f"<div style='flex:{v} 1 0;background:{ren[k]}' title='{ad[k]}: {v} müşteri'></div>" for k, v in enumerate(sayim[i])) +
-                     f"</div><span style='text-align:right;color:#5b6475'>{t}</span></div>")
+                     f"</div><span style='text-align:right;color:var(--muted)'>{t}</span></div>")
         st.markdown(bars, unsafe_allow_html=True)
         st.caption("Sağdaki sayı: gruptaki müşteri adedi. Bırakma olasılığı için Satış sayfasına bak.")
 
@@ -3437,11 +3974,11 @@ def sayfa_pazarlama():
             h = ""
             for il_ad, r in top.iterrows():
                 h += (f"<div style='display:grid;grid-template-columns:80px minmax(0,1fr) 50px 170px;gap:8px;align-items:center;padding:4px 0;font-size:12px'><span>{il_ad}</span>"
-                      f"<div style='height:16px;background:#f0ebe2;border-radius:4px'><div style='width:{r['net'] / mx * 100:.1f}%;height:100%;background:#d9622b;border-radius:4px'></div></div>"
+                      f"<div style='height:16px;background:var(--track);border-radius:4px'><div style='width:{r['net'] / mx * 100:.1f}%;height:100%;background:#d9622b;border-radius:4px'></div></div>"
                       f"<span style='text-align:right;font-weight:600'>%{ui.sayi(r['net'] / tot * 100, 1)}</span>"
-                      f"<span style='text-align:right;color:#5b6475;white-space:nowrap'>{int(r['musteri'])} müşteri · {ui.sayi(r['siparis'])} sipariş</span></div>")
+                      f"<span style='text-align:right;color:var(--muted);white-space:nowrap'>{int(r['musteri'])} müşteri · {ui.sayi(r['siparis'])} sipariş</span></div>")
             st.markdown(h, unsafe_allow_html=True)
-            st.caption(f"Diğer iller %{ui.sayi(max(0, 100 - top['net'].sum() / tot * 100), 1)}. İl, müşterinin en çok sipariş verdiği ildir.")
+            st.caption(f"Diğer iller %{ui.sayi(max(0, 100 - top['net'].sum() / tot * 100), 1)}. İl, siparişin kesildiği ildir; birden fazla ilden sipariş veren müşteri her ilde sayılır.")
     cift = w.birlikte_c(m, K, a, b)
     gor, gorulen = [], set()
     for c in cift:
@@ -3459,7 +3996,7 @@ def sayfa_pazarlama():
             mx = gor[0]["n"]
             st.markdown("".join(
                 f"<div style='padding:5px 0;font-size:12px'><div style='display:flex;justify-content:space-between;gap:8px'><span><b>{c['a']}</b> + <b>{c['b']}</b></span>"
-                f"<span style='white-space:nowrap;font-weight:600'>{c['n']} sipariş</span></div><div style='height:6px;background:#f0ebe2;border-radius:3px;margin-top:3px'>"
+                f"<span style='white-space:nowrap;font-weight:600'>{c['n']} sipariş · lift {ui.sayi(c['lift'], 1)}</span></div><div style='height:6px;background:var(--track);border-radius:3px;margin-top:3px'>"
                 f"<div style='width:{c['n'] / mx * 100:.0f}%;height:100%;background:#3d9a84;border-radius:3px'></div></div></div>" for c in gor), unsafe_allow_html=True)
 
     # ---------- 7. Kategori tercihi ----------
@@ -3475,7 +4012,7 @@ def sayfa_pazarlama():
                 w.vurgu(f"{an2.SEG_AD[en[1]]} grubunun {cats[en[2]]} alımı ortalamanın {ui.sayi(en[0] / 100, 1)} katı.")
             st.markdown(w.sapma_tablo(an2.SEG_AD[:6], cats, KM), unsafe_allow_html=True)
 
-    # ---------- RafBot ----------
+    # ---------- Akıllı Asistan ----------
     bilgi = {
         "ciro": f"Seçili dönemde {ui.sayi(ch['aS'])} müşteri sipariş verdi: " + ", ".join(f"{an2.SEG_AD[i]} {cnt_seg[i]}" for i in range(6)) + ".",
         "segment": f"Seçili dönemde {ui.sayi(ch['aS'])} müşteri sipariş verdi: " + ", ".join(f"{an2.SEG_AD[i]} {cnt_seg[i]}" for i in range(6)) + ".",
@@ -3483,6 +4020,8 @@ def sayfa_pazarlama():
         "kopru": f"Aktif müşteri {ui.sayi(ch['aC'])} → {ui.sayi(ch['aS'])}: {ui.sayi(ch['nw'])} yeni, {ui.sayi(ch['bk'])} geri dönen, {ui.sayi(ch['ls'])} kaybedilen.",
         "birlikte": (f"Seçili dönemde en sık birlikte alınan çift: {gor[0]['a']} + {gor[0]['b']} ({gor[0]['n']} sipariş).") if gor else None,
         "indirim": None, "gun": None,
+        "kohort": (f"Yeni müşterilerin ilk siparişten sonraki çeyrekte %{ui.sayi(KG[1], 0)}’i" + (f", ikinci çeyrekte %{ui.sayi(KG[2], 0)}’i" if KG[2] is not None else "")
+                   + " tekrar sipariş verdi (veri başlangıcındaki kohort hariç).") if KG[1] is not None else None,
     }
     chat.rafbot(bilgi)
 
@@ -3516,7 +4055,8 @@ def sayfa_tedarik():
 
     tum = data.veri()
     vid = (st.session_state.get("dosya_adi", ""), len(tum))
-    ui.baslik("Tedarik Zinciri", "Ne kadar stok tutmalı, ne zaman sipariş vermeli?")
+    ui.baslik("Tedarik Zinciri", "Ne kadar stok tutmalı, ne zaman sipariş vermeli?",
+              f"Üstteki göstergeler seçtiğin tarihlere göre hesaplanır. Paneller verinin son gününe ({ui.tarih_etiketi(tum['gun'].max(), tum['gun'].max())}) ve tüm veriye göre hazırlandı.")
     m, a, b, ca, cb = ui.filtreler(tum)
     K = w.fk()
     if m.empty:
@@ -3536,7 +4076,6 @@ def sayfa_tedarik():
         w.kart("Net ciro", ui.sayi(S["net"] / 1e6, 2) + " M ₺", w.chg(w.rel(S["net"], C["net"]), hN), "Günlük ort.", ui.sayi(S["dnet"] / 1000, 1) + " bin ₺", w.chg(w.rel(S["dnet"], C["dnet"]), hD), "#e0a526"),
     ])
     bit = tum["gun"].max()
-    w.not_kutusu(f"Üstteki göstergeler seçtiğin tarihlere göre hesaplanır. Paneller verinin son gününe ({et(bit, bit)}) ve tüm veriye göre hazırlandı.")
 
     qadet, kum, abc, xyz = c_abc(tum, vid)
     nprod = len(qadet)
@@ -3548,19 +4087,19 @@ def sayfa_tedarik():
     cls = abc + xyz
 
     # ---------- 1-2 (ABC Pareto & ABC-XYZ Matrisi — Adet Bazlı) ----------
-    p1, p2 = st.columns([1.45, 1])
+    p1, p2 = st.container(), st.container()  # Pareto tam genişlikte; ABC–XYZ matrisi altında
     with p1, st.container(border=True):
         st.markdown(
-            f"<div style='font-size:12px;font-weight:700;color:#14513f;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:3px'>"
+            f"<div style='font-size:12px;font-weight:700;color:var(--vurgu);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:3px'>"
             f"1 · ABC PARETO VE ÜRÜN SIRALAMASI</div>"
-            f"<div style='font-family:Poppins,sans-serif;font-size:18px;font-weight:700;color:#1f2a44;line-height:1.3;margin-bottom:10px'>"
+            f"<div style='font-family:Poppins,sans-serif;font-size:18px;font-weight:700;color:var(--fg);line-height:1.3;margin-bottom:10px'>"
             f"Ürünlerin %{ui.sayi(a_pay, 0)}’i ({ui.sayi(cnt['A'])} SKU) satılan adedin %80’ini oluşturuyor.</div>",
             unsafe_allow_html=True,
         )
         c_sol, c_sag = st.columns([1, 1.18])
         with c_sol:
             st.markdown(
-                f"<div style='display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:#3a4357;margin:2px 0 8px 0'>"
+                f"<div style='display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--fg2);margin:2px 0 8px 0'>"
                 f"<span><span style='display:inline-block;width:10px;height:10px;border-radius:2px;background:#689f90;margin-right:5px;vertical-align:middle'></span>A · %{ui.sayi(a_pay, 0)} SKU · %80 adet</span>"
                 f"<span><span style='display:inline-block;width:10px;height:10px;border-radius:2px;background:#accbc2;margin-right:5px;vertical-align:middle'></span>B · %{ui.sayi(b_pay, 0)} SKU · %15</span>"
                 f"<span><span style='display:inline-block;width:10px;height:10px;border-radius:2px;background:#dfece7;margin-right:5px;vertical-align:middle'></span>C · %{ui.sayi(c_pay, 0)} SKU · %5</span>"
@@ -3616,7 +4155,7 @@ def sayfa_tedarik():
             )
             ui.plot(fig)
             st.markdown(
-                "<div style='text-align:center;font-size:11.5px;color:#5b6475;margin-top:-4px'>"
+                "<div style='text-align:center;font-size:11.5px;color:var(--muted);margin-top:-4px'>"
                 "SKU payı (satış adedi büyükten küçüğe)</div>",
                 unsafe_allow_html=True,
             )
@@ -3631,18 +4170,18 @@ def sayfa_tedarik():
             satir = []
             for i, (u, v) in enumerate(ust.items(), 1):
                 c = cls[u]
-                ad_kisa = u if len(u) < 34 else u[:34] + "…"
+                ad_kisa = u if len(u) < 70 else u[:70] + "…"
                 adet_str = f"{ui.sayi(v / 1000, 1)} bin" if v >= 1000 else f"{ui.sayi(v)}"
                 satir.append([
-                    f"<span style='color:#5b6475'>{i}</span>",
-                    f"<div style='font-weight:600;color:#1f2a44;line-height:1.25'>{ad_kisa}</div>"
-                    f"<div style='font-size:10.5px;color:#5b6475'>{katg.get(u, '')}</div>",
+                    f"<span style='color:var(--muted)'>{i}</span>",
+                    f"<div style='font-weight:600;color:var(--fg);line-height:1.25'>{ad_kisa}</div>"
+                    f"<div style='font-size:10.5px;color:var(--muted)'>{katg.get(u, '')}</div>",
                     f"<span style='display:inline-block;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;{sinif_renk[c[0]]}'>{c}</span>",
-                    f"<span style='font-weight:700;color:#1f2a44'>{adet_str}</span>",
-                    f"<span style='color:#3a4357'>%{ui.sayi(kum[u] * 100, 1)}</span>",
+                    f"<span style='font-weight:700;color:var(--fg)'>{adet_str}</span>",
+                    f"<span style='color:var(--fg2)'>%{ui.sayi(kum[u] * 100, 1)}</span>",
                 ])
             st.markdown(
-                "<div style='font-family:Poppins,sans-serif;font-weight:600;font-size:15px;color:#1f2a44;margin:0 0 4px 0'>"
+                "<div style='font-family:Poppins,sans-serif;font-weight:600;font-size:15px;color:var(--fg);margin:0 0 4px 0'>"
                 "En çok adet satan ürünler</div>"
                 + w.tablo(["#", "ÜRÜN", "SINIF", "ADET", "KÜMÜLATİF"], satir, sag=(3, 4)),
                 unsafe_allow_html=True,
@@ -3652,9 +4191,9 @@ def sayfa_tedarik():
     hucre = {k: (int((cls == k).sum()), float(qadet[cls == k].sum() / toplam_q * 100)) for k in an2.POLITIKA}
     with p2, st.container(border=True):
         st.markdown(
-            f"<div style='font-size:12px;font-weight:700;color:#14513f;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:3px'>"
+            f"<div style='font-size:12px;font-weight:700;color:var(--vurgu);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:3px'>"
             f"2 · ABC–XYZ MATRİSİ</div>"
-            f"<div style='font-family:Poppins,sans-serif;font-size:18px;font-weight:700;color:#1f2a44;line-height:1.3;margin-bottom:10px'>"
+            f"<div style='font-family:Poppins,sans-serif;font-size:18px;font-weight:700;color:var(--fg);line-height:1.3;margin-bottom:10px'>"
             f"AX ürünleri otomatik yenilenebilir; AZ olan {ui.sayi(hucre['AZ'][0])} SKU ise yakından izlenmeli.</div>",
             unsafe_allow_html=True,
         )
@@ -3667,16 +4206,16 @@ def sayfa_tedarik():
         g = (
             "<div style='display:grid;grid-template-columns:56px repeat(3,minmax(0,1fr));gap:6px;align-items:center'>"
             "<div></div>"
-            "<div style='font-size:11.5px;color:#3a4357;padding:0 2px'><b style='color:#1f2a44'>X</b><br><span style='font-size:10.5px;color:#5b6475'>düzenli</span></div>"
-            "<div style='font-size:11.5px;color:#3a4357;padding:0 2px'><b style='color:#1f2a44'>Y</b><br><span style='font-size:10.5px;color:#5b6475'>dalgalı</span></div>"
-            "<div style='font-size:11.5px;color:#3a4357;padding:0 2px'><b style='color:#1f2a44'>Z</b><br><span style='font-size:10.5px;color:#5b6475'>düzensiz</span></div>"
+            "<div style='font-size:11.5px;color:var(--fg2);padding:0 2px'><b style='color:var(--fg)'>X</b><br><span style='font-size:10.5px;color:var(--muted)'>düzenli</span></div>"
+            "<div style='font-size:11.5px;color:var(--fg2);padding:0 2px'><b style='color:var(--fg)'>Y</b><br><span style='font-size:10.5px;color:var(--muted)'>dalgalı</span></div>"
+            "<div style='font-size:11.5px;color:var(--fg2);padding:0 2px'><b style='color:var(--fg)'>Z</b><br><span style='font-size:10.5px;color:var(--muted)'>düzensiz</span></div>"
         )
         for r_harf in ("A", "B", "C"):
             r_bas, r_alt = satir_etiket[r_harf]
             g += (
                 f"<div style='font-size:12px;line-height:1.25;padding-right:4px'>"
-                f"<b style='font-size:13.5px;color:#1f2a44'>{r_bas}</b><br>"
-                f"<span style='font-size:10.5px;color:#5b6475'>{r_alt}</span></div>"
+                f"<b style='font-size:13.5px;color:var(--fg)'>{r_bas}</b><br>"
+                f"<span style='font-size:10.5px;color:var(--muted)'>{r_alt}</span></div>"
             )
             for c_harf in ("X", "Y", "Z"):
                 k = r_harf + c_harf
@@ -3694,7 +4233,7 @@ def sayfa_tedarik():
         g += "</div>"
         st.markdown(g, unsafe_allow_html=True)
         st.markdown(
-            "<div style='font-size:11.5px;color:#5b6475;margin-top:10px'>"
+            "<div style='font-size:11.5px;color:var(--muted);margin-top:10px'>"
             "X: CV ≤ 0,5 · Y: 0,5 &lt; CV ≤ 1,0 · Z: CV &gt; 1,0 · Renk koyuluğu = adet payı</div>",
             unsafe_allow_html=True,
         )
@@ -3702,7 +4241,7 @@ def sayfa_tedarik():
     # ---------- 3. Talep tahmini ----------
     top12 = qadet.head(12).index.tolist()
     with st.container(border=True):
-        ui.bolum(3, "Önümüzdeki 8 haftada ne kadar talep bekleniyor?", "Ürünü seç; üç basit yöntem son 12 haftada denendi, hatası en düşük olan seçildi")
+        ui.bolum(3, "Önümüzdeki 8 haftada ne kadar talep bekleniyor?", "Ürünü seç; dört yöntem (iki ortalama, sönümlü trend, aralıklı talep için Croston-SBA) son 12 haftada denendi, hatası en düşük olan seçildi")
         urun = st.selectbox("Ürün", top12, format_func=lambda s: s if len(s) < 50 else s[:50] + "…", key="ted_urun")
         wk, gunluk, sonuc, en = c_hafta(tum, vid, urun)
         best = sonuc[en]
@@ -3710,12 +4249,12 @@ def sayfa_tedarik():
         sum8, last8 = sum(f8), float(wk[-8:].sum())
         w.vurgu(f"{urun if len(urun) < 50 else urun[:50] + '…'}: {ui.sayi(sum8)} adet, son 8 haftadan " +
                 (f"%{ui.sayi((sum8 / max(1, last8) - 1) * 100, 0)} fazla." if sum8 >= last8 else f"%{ui.sayi((1 - sum8 / max(1, last8)) * 100, 0)} az."))
-        cols = st.columns(3)
+        cols = st.columns(len(sonuc))
         for i, (kol, r) in enumerate(zip(cols, sonuc)):
             on = i == en
             kol.markdown(f"<div style='border:1px solid {'#3d9a84' if on else '#e4dfd6'};background:{'#eaf4f0' if on else '#fff'};border-radius:10px;padding:8px 10px'>"
                          f"<div style='font-size:12px'>{r['ad']}</div><div style='font-size:13px;font-weight:700'>Hata %{ui.sayi(r['wape'] * 100, 1)}</div>"
-                         + ("<div style='font-size:11px;color:#14513f;font-weight:600'>✓ seçilen</div>" if on else "") + "</div>", unsafe_allow_html=True)
+                         + ("<div style='font-size:11px;color:var(--vurgu);font-weight:600'>✓ seçilen</div>" if on else "") + "</div>", unsafe_allow_html=True)
         hist = wk[-26:]
         n = len(hist)
         hh = np.arange(n)
@@ -3723,17 +4262,17 @@ def sayfa_tedarik():
         up = [v + x for v, x in zip(f8, e)]
         lo = [max(0, v - x) for v, x in zip(f8, e)]
         fig = go.Figure()
-        fig.add_vrect(x0=n - 12, x1=n - 1, fillcolor="#efeae0", line_width=0, layer="below", annotation_text="test dönemi", annotation_position="top")
+        fig.add_vrect(x0=n - len(best["fcs"]), x1=n - 1, fillcolor="#efeae0", line_width=0, layer="below", annotation_text="test dönemi", annotation_position="top")
         fig.add_scatter(x=np.r_[np.arange(n, n + 8), np.arange(n + 7, n - 1, -1)], y=np.r_[up, lo[::-1]], fill="toself",
                         fillcolor="rgba(159,207,194,.55)", line=dict(width=0), hoverinfo="skip", name="olası aralık")
         fig.add_scatter(x=hh, y=hist, mode="lines", line=dict(color="#1f2a44", width=2), name="gerçek haftalık adet")
-        fig.add_scatter(x=np.arange(n - 12, n), y=best["fcs"], mode="lines", line=dict(color="#3d9a84", width=1.5, dash="dash"), name="test tahmini")
+        fig.add_scatter(x=np.arange(n - len(best["fcs"]), n), y=best["fcs"], mode="lines", line=dict(color="#3d9a84", width=1.5, dash="dash"), name="test tahmini")
         fig.add_scatter(x=np.r_[n - 1, np.arange(n, n + 8)], y=np.r_[hist[-1], f8], mode="lines", line=dict(color="#3d9a84", width=2.5, dash="dash"), name="tahmin")
         fig.add_vline(x=n - 1, line_dash="dot", line_color="#1f2a44")
         fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor="white", legend=dict(orientation="h", y=-0.15),
                           xaxis=dict(showticklabels=False, title="26 hafta önce → son hafta → +8 hafta"), yaxis=dict(title="haftalık adet", rangemode="tozero"))
         ui.plot(fig)
-        st.caption("Hata %: 4 haftalık toplam talepte, tahmin ile gerçek arasındaki farkların toplamı ÷ gerçek toplam (son 12 deneme). Düşük olan iyi. "
+        st.caption("Hata %: 4 haftalık toplam talepte, tahmin ile gerçek arasındaki farkların toplamı ÷ gerçek toplam (test penceresindeki kayan 4 haftalık dilimler). Düşük olan iyi. "
                    "Veri tek yıl olduğu için mevsimsel yöntemler denenmedi.")
 
     # ---------- 4. Güvenlik stoğu ----------
@@ -3743,13 +4282,13 @@ def sayfa_tedarik():
         with s1:
             lt = st.slider("Tedarik süresi (hafta)", 1, 6, 2, key="ted_lt")
             sl = st.slider("Hizmet seviyesi (%)", 85, 99, 95, key="ted_sl")
-            st.caption("Hizmet seviyesi: talebin stoktan karşılanma olasılığı. Güvenlik stoğu = z × haftalık sapma × √tedarik süresi. "
-                       "Sipariş noktası = haftalık talep × süre + güvenlik stoğu.")
-        stk = an2.stok(wk, gunluk, lt, sl)
+            st.caption("Hizmet seviyesi: bir tedarik döngüsünde stoksuz kalmama olasılığı (döngü hizmet seviyesi). Güvenlik stoğu = z × haftalık tahmin hatası sapması × √tedarik süresi. "
+                       "Sipariş noktası = haftalık tahmin × süre + güvenlik stoğu.")
+        stk = an2.stok(wk, gunluk, lt, sl, sd_hata=best["sd"], mu_tahmin=float(np.mean(f8)))
         with s2:
             c = st.columns(2)
             for kol, (t, v, alt) in zip(c * 2, [("Güvenlik stoğu", f"{ui.sayi(stk['ss'])} adet", ""), ("Sipariş noktası", f"{ui.sayi(stk['rop'])} adet", "stok bu seviyeye inince sipariş ver"),
-                                                ("Haftalık talep", f"{ui.sayi(stk['mu'])} adet", "son 26 hafta ortalaması"),
+                                                ("Haftalık tahmin", f"{ui.sayi(stk['mu'])} adet", "seçilen yöntemin tahmini"),
                                                 ("Stoksuz gün", f"{stk['out']} / {stk['n']}", "son 26 haftayı bu kuralla oynatınca")]):
                 kol.markdown(f"<div class='out'><div class='t'>{t}</div><div class='v'>{v}</div><div class='t'>{alt}</div></div><div style='height:6px'></div>", unsafe_allow_html=True)
         fig = go.Figure()
@@ -3768,10 +4307,10 @@ def sayfa_tedarik():
     # ---------- 5. Mevsimsellik ----------
     cats, SM, yil = an2.mevsimsellik(tum)
     with st.container(border=True):
-        ui.bolum(5, "Hangi ay hangi kategori güçlü?", f"Kategorinin aylık satılan adedi ÷ kendi aylık ortalaması · 100 = ortalama · {yil}")
+        ui.bolum(5, "Hangi ay hangi kategori güçlü?", f"Kategorinin aylık satılan adedi ÷ kendi aylık ortalaması · 100 = ortalama · {yil} · kısmi aylar gün sayısına göre ölçeklendi")
         if len(cats):
             bs = max(((v, i, j) for i, r in enumerate(SM) for j, v in enumerate(r)), default=(0, 0, 0))
-            w.vurgu(f"{cats[bs[1]]} talebi {w.AY_AD[bs[2]]} ayında ortalamanın {ui.sayi(bs[0] / 100, 1)} katına çıkıyor.")
+            w.vurgu(f"{yil} yılında {cats[bs[1]]} talebi {w.AY_AD[bs[2]]} ayında ortalamanın {ui.sayi(bs[0] / 100, 1)} katına çıktı. Tek yıllık veri olduğu için bu bir mevsim deseni değil, o yılın aylık dağılımıdır.")
             st.markdown(w.sapma_tablo(cats, ui.AYLAR, SM), unsafe_allow_html=True)
 
     # ---------- 6. Satışsız ürünler ----------
@@ -3787,7 +4326,7 @@ def sayfa_tedarik():
                     f"satılmadı (toplam {ui.sayi(len(ds))} üründen). Stokta varsa eritme kampanyası veya iade konuşulmalı.</div>", unsafe_allow_html=True)
         mx = max(bs_n) or 1
         st.markdown("".join(f"<div style='display:grid;grid-template-columns:80px minmax(0,1fr) 60px;gap:8px;align-items:center;padding:4px 0;font-size:12px'><span>{bs_ad[i]}</span>"
-                            f"<div style='height:18px;background:#f0ebe2;border-radius:4px'><div style='width:{v / mx * 100:.1f}%;height:100%;background:{bs_r[i]};border-radius:4px'></div></div>"
+                            f"<div style='height:18px;background:var(--track);border-radius:4px'><div style='width:{v / mx * 100:.1f}%;height:100%;background:{bs_r[i]};border-radius:4px'></div></div>"
                             f"<span style='text-align:right;font-weight:600'>{ui.sayi(v)}</span></div>" for i, v in enumerate(bs_n)), unsafe_allow_html=True)
         esik = st.selectbox("Liste", [120, 180, 270], format_func=lambda x: f"{x}+ gün", key="ted_idle")
         lst = ds[ds["gun"] >= esik].sort_values("gun", ascending=False)
@@ -3803,17 +4342,17 @@ def sayfa_tedarik():
         for u in top12:
             wk_u, gk_u, sn_u, en_u = c_hafta(tum, vid, u)
             f4 = sum(sn_u[en_u]["f"](wk_u, 4))
-            k = an2.stok(wk_u, gk_u, lt, sl)
+            k = an2.stok(wk_u, gk_u, lt, sl, sd_hata=sn_u[en_u]["sd"], mu_tahmin=f4 / 4)
             hata = sn_u[en_u]["wape"]
             sinif = cls[u]
             satir.append([u if len(u) < 40 else u[:40] + "…", f"<span class='pill g'>{sinif}</span>", ui.sayi(f4),
                           f"<span style='color:{'#8f2a24' if hata > 0.2 else '#14513f'};font-weight:600'>%{ui.sayi(hata * 100, 1)}</span>",
                           ui.sayi(k["ss"]), ui.sayi(k["rop"]), an2.POLITIKA[sinif]])
-            stil.append("background:#eaf4f0" if u == urun else "")
+            stil.append("background:var(--soft)" if u == urun else "")
         st.markdown(w.tablo(["Ürün", "Sınıf", "4 haftalık talep", "Hata %", "Güvenlik stoğu", "Sipariş noktası", "İzlenecek politika"], satir, sag=(2, 3, 4, 5), stil=stil), unsafe_allow_html=True)
         st.caption("Hata %’si 20’nin üstündeyse (kırmızı) tahmine fazla güvenme, siparişe göre tedarik daha güvenli.")
 
-    # ---------- RafBot ----------
+    # ---------- Akıllı Asistan ----------
     bilgi = {
         "ciro": f"Seçili {et(a, b)} döneminde {ui.sayi(S['q'])} adet satıldı, günlük {ui.sayi(S['dq'])} adet.",
         "indirim": f"{urun} için {lt} hafta tedarik süresi ve %{sl} hizmet seviyesiyle güvenlik stoğu ≈ {ui.sayi(stk['ss'])}, sipariş noktası ≈ {ui.sayi(stk['rop'])} adet.",
@@ -3821,6 +4360,8 @@ def sayfa_tedarik():
         "kopru": f"{urun} için en iyi yöntem “{best['ad']}” (hata %{ui.sayi(best['wape'] * 100, 1)}). Önümüzdeki 8 haftada ≈ {ui.sayi(sum8)} adet bekleniyor.",
         "segment": f"Ürünlerin %{ui.sayi(a_pay, 1)}’i adedin %80’ini getiriyor (A). A ürünlerinin {ui.sayi(hucre['AZ'][0])} tanesinde talep düzensiz.",
         "birlikte": None, "gun": None,
+        "mevsim": (f"{yil} yılında {cats[bs[1]]} talebi en çok {w.AY_AD[bs[2]]} ayında yükseldi (ortalamanın {ui.sayi(bs[0] / 100, 1)} katı). "
+                   "Tek yıllık veri olduğundan mevsimsellik olarak genellenmemeli.") if len(cats) else None,
     }
     chat.rafbot(bilgi)
 
@@ -3831,7 +4372,8 @@ def sayfa_tedarik():
 def sayfa_kalite():
     tum = data.veri()
     kal = st.session_state.get("kalite") or {}
-    ui.baslik("Veri Kalitesi", "Bu verilere ne kadar güvenebiliriz ve rakamlar nasıl hesaplandı?")
+    ui.baslik("Veri Kalitesi", "Bu verilere ne kadar güvenebiliriz ve rakamlar nasıl hesaplandı?",
+              "Bu sayfa yüklenen verinin tamamını değerlendirir; soldaki filtreler burada uygulanmaz.")
     ui.filtreler(tum)
 
 
@@ -3858,13 +4400,13 @@ def sayfa_kalite():
     with st.container(border=True):
         ui.bolum(1, "Veri ön işleme · 5 adım", "Ham dosyadan panellere giden yol")
         adimlar = [("1 · YÜKLEME", ui.sayi(ham), f"satır okundu · {kal.get('ham_sutun', '?')} sütun"),
-                   ("2 · TEMİZLİK", "−" + ui.sayi(atilan), "sıfır/negatif satır çıkarıldı"),
-                   ("3 · HESAPLAMA", "+" + str(kal.get("yeni_sutun", "?")), "yeni sütun: brüt ciro, net ciro, indirim"),
+                   ("2 · TEMİZLİK", "−" + ui.sayi(atilan), "geçersiz satır çıkarıldı: eksik alan, ≤ 0 miktar/fiyat, net > liste fiyatı"),
+                   ("3 · HESAPLAMA", "+" + str(kal.get("yeni_sutun", "?")), "yeni sütun: gün, haftanın günü, brüt ciro, net ciro, indirim"),
                    ("4 · SEGMENTLEME", "A · B · C", "müşteri ve ürün, ciro payına göre"),
                    ("5 · ANOMALİ DENETİMİ", ui.sayi(asan_say), "sipariş normdan fazla indirimli")]
         for kol, (t, v, s) in zip(st.columns(5), adimlar):
-            kol.markdown(f"<div style='background:#faf7f2;border:1px solid #e4dfd6;border-radius:12px;padding:10px 12px;height:100%'><div style='font-size:10px;font-weight:700;color:#5b6475;letter-spacing:.04em'>{t}</div>"
-                         f"<div style='font-family:Poppins;font-weight:700;font-size:20px;margin:4px 0'>{v}</div><div style='font-size:11px;color:#5b6475'>{s}</div></div>", unsafe_allow_html=True)
+            kol.markdown(f"<div style='background:var(--side);border:1px solid var(--line);border-radius:12px;padding:10px 12px;height:100%'><div style='font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.04em'>{t}</div>"
+                         f"<div style='font-family:Poppins;font-weight:700;font-size:20px;margin:4px 0'>{v}</div><div style='font-size:11px;color:var(--muted)'>{s}</div></div>", unsafe_allow_html=True)
 
     # 2
     bos = kal.get("bos", {})
@@ -3888,7 +4430,7 @@ def sayfa_kalite():
             pc = ui.sayi(p, 2)
             pc = pc[:-3] if pc.endswith(",00") else pc
             h += (f"<div style='display:grid;grid-template-columns:minmax(150px,.7fr) 2fr 70px;gap:14px;align-items:center;padding:6px 0'><span>{e}</span>"
-                  f"<div><div style='background:#ece7dd;border-radius:999px;height:16px'><div style='width:{p:.2f}%;background:{renk};height:16px;border-radius:999px'></div></div>"
+                  f"<div><div style='background:var(--track);border-radius:999px;height:16px'><div style='width:{p:.2f}%;background:{renk};height:16px;border-radius:999px'></div></div>"
                   + (f"<span class='pill {pill}' style='margin-top:5px;font-weight:600'>{n}</span>" if n else "") +
                   f"</div><b style='text-align:right'>%{pc}</b></div>")
         st.markdown(h, unsafe_allow_html=True)
@@ -3898,24 +4440,24 @@ def sayfa_kalite():
     with st.container(border=True):
         ui.bolum(3, "Tekrar eden satırlar")
         st.markdown(f"<div style='font-size:13px'>Birebir aynı satır <b>{ui.sayi(tekrar)}</b> <span class='pill y'>%{ui.sayi(tekrar / ham * 100, 1)}</span></div>"
-                    f"<div style='font-size:12px;color:#5b6475;margin:4px 0 8px'>Silinmedi: aynı ürün aynı siparişte iki kez okutulmuş olabilir. Silmek cirodan yaklaşık %{ui.sayi(tekrar / ham * 100, 1)} götürürdü.</div>"
+                    f"<div style='font-size:12px;color:var(--muted);margin:4px 0 8px'>Silinmedi: aynı ürün aynı siparişte iki kez okutulmuş olabilir. Tekrarlar satırların %{ui.sayi(tekrar / ham * 100, 1)}'i.</div>"
                     "<span class='pill'>Bilinen risk · küçük</span>", unsafe_allow_html=True)
 
     # 4
     with st.container(border=True):
-        ui.bolum(4, "Hangi kategoride indirim normu en çok aşılıyor?", "Her kategorinin normal indirimi (norm) var. Normun 10 puan üstünde indirimle kesilen siparişlerin payı")
+        ui.bolum(4, "Hangi kategoride indirim normu en çok aşılıyor?", "Norm: aynı kategori ve benzer sipariş büyüklüğündeki siparişlerin ortanca indirimi. Normun 10 puan üstünde indirimle kesilen siparişlerin payı")
         st.markdown(f"<span class='pill r'>Her 100 siparişin {ui.sayi(asan_say / top['toplam'] * 100, 0)}'si normun üstünde indirimli</span>"
                     f"<span class='pill y'>Fazlası toplam ≈ {ui.tl(top['fazla'])}</span>", unsafe_allow_html=True)
         h = ""
         mx = max(float(kn["pay"].max()), 0.01)
         for kat, r in kn.head(7).iterrows():
             esik = ui.sayi((r["md"] + 0.10) * 100, 0)
-            h += (f"<div style='display:grid;grid-template-columns:minmax(220px,1.3fr) 1.4fr minmax(130px,.7fr);gap:14px;align-items:center;padding:8px 0;border-bottom:1px solid #eee9df'>"
+            h += (f"<div style='display:grid;grid-template-columns:minmax(220px,1.3fr) 1.4fr minmax(130px,.7fr);gap:14px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)'>"
                   f"<div><div style='font-weight:700;font-size:14px'>{kat}</div>"
-                  f"<div style='font-size:12px;color:#5b6475;line-height:1.35'>Siparişlerin %{ui.sayi(r['pay'] * 100, 0)}'inde ({ui.sayi(r['asan'])} sipariş) indirim %{esik} ve üzeri · norm %{ui.sayi(r['md'] * 100, 0)}</div></div>"
-                  f"<div style='background:#ece7dd;border-radius:999px;height:14px'><div style='width:{r['pay'] / mx * 90:.1f}%;background:#c25b50;height:14px;border-radius:999px'></div></div>"
+                  f"<div style='font-size:12px;color:var(--muted);line-height:1.35'>Siparişlerin %{ui.sayi(r['pay'] * 100, 0)}'inde ({ui.sayi(r['asan'])} sipariş) indirim %{esik} ve üzeri · norm %{ui.sayi(r['md'] * 100, 0)}</div></div>"
+                  f"<div style='background:var(--track);border-radius:999px;height:14px'><div style='width:{r['pay'] / mx * 90:.1f}%;background:#c25b50;height:14px;border-radius:999px'></div></div>"
                   f"<div style='text-align:right'><div style='font-weight:700;font-size:14px'>%{ui.sayi(r['pay'] * 100, 0)} ({ui.sayi(r['asan'])} sipariş)</div>"
-                  f"<div style='font-size:12px;color:#5b6475'>≈ {ui.tl(r['fazla'])} fazla</div></div></div>")
+                  f"<div style='font-size:12px;color:var(--muted)'>≈ {ui.tl(r['fazla'])} fazla</div></div></div>")
         st.markdown(h, unsafe_allow_html=True)
 
     # 5
@@ -3924,34 +4466,34 @@ def sayfa_kalite():
         kt = [("Varsayım", "Maliyet verisi yok", "Alış maliyeti ürüne göre değişir. Tek ürün planında maliyeti sen girersin; başlangıç değeri liste fiyatın %44'ü", "Satış · indirim planı"),
               ("Varsayım", "Stok verisi yok", "Güvenlik stoğu ve sipariş noktası talebe göre hesaplanıyor", "Tedarik · yönetici özeti"),
               ("Sınır", "Saat bilgisi yok", "Yalnız gün bazlı analiz yapılabiliyor", "Satış · haftanın günü"),
-              ("Sınır", "Yalnız 2020", "Yıllık mevsimsellik öğrenilemiyor; tahmin hatası ≈ %25", "Yönetici · tahminler")]
+              ("Sınır", f"Tek dönem: {ilk.year}" if ilk.year == son.year else f"Dönem: {ilk.year}–{son.year}", "Mevsimsellik için en az 2–3 yıllık veri gerekir; aylık desenler yalnız bu dönemi yansıtır", "Tedarik · Yönetici tahminleri")]
         for kol, (t, b, s, y) in zip(st.columns(4), kt):
-            kol.markdown(f"<div style='background:#faf7f2;border:1px solid #e4dfd6;border-radius:12px;padding:10px 12px;height:100%'><span class='pill {'y' if t == 'Sınır' else 'g'}'>{t}</span>"
+            kol.markdown(f"<div style='background:var(--side);border:1px solid var(--line);border-radius:12px;padding:10px 12px;height:100%'><span class='pill {'y' if t == 'Sınır' else 'g'}'>{t}</span>"
                          f"<div style='font-weight:700;margin:4px 0'>{b}</div><div style='font-size:12px;line-height:1.5'>{s}</div>"
-                         f"<div style='font-size:11px;color:#5b6475;margin-top:6px'>{y}</div></div>", unsafe_allow_html=True)
+                         f"<div style='font-size:11px;color:var(--muted);margin-top:6px'>{y}</div></div>", unsafe_allow_html=True)
 
     # 6
     SOZLUK = {
         "Net ciro": ("Net ciro = Σ miktar × net fiyat", "İndirim düşüldükten sonra tahsil edilen tutar. Liste fiyat üzerinden hesaplanan brüt ciro ayrıca tutulur.", "Satış · KPI · Yönetici · karne"),
         "İndirim oranı": ("İndirim oranı = 1 − net ciro / brüt ciro", "Liste fiyata göre verilen toplam indirim. Dönem içinde ciro ağırlıklı hesaplanır.", "Satış · Yönetici"),
-        "Fazla indirim": ("Fazla indirim = Σ (sipariş indirimi − kategori normu) × brüt tutar", "Yalnız normdan 10 puan fazla indirimli siparişler sayılır. Kategori normu, o kategorinin ortanca indirimidir.", "Satış · şüpheli sipariş · Veri kalitesi"),
+        "Fazla indirim": ("Fazla indirim = Σ (sipariş indirimi − norm) × brüt tutar", "Yalnız normdan 10 puan fazla indirimli siparişler sayılır. Norm, aynı kategori ve benzer sipariş büyüklüğündeki (kategori içi adet çeyreği) siparişlerin ortanca indirimidir; büyük siparişe verilen hacim indirimi böylece şüpheli sayılmaz.", "Satış · şüpheli sipariş · Veri kalitesi"),
         "Segment A-B-C": ("A: cironun ilk %80’i · B: sonraki %15 · C: son %5", "Müşteri ve ürünler ciroya göre büyükten küçüğe sıralanır, kümülatif paya göre bölünür.", "Satış · Yönetici · Tedarik"),
-        "Churn riski": ("Risk = P(30 gün içinde sipariş vermeme)", "Geçmiş sipariş sıklığı, son siparişten geçen süre ve tutarlardan öğrenen bir model hesaplar. %70 ve üzeri yüksek risk.", "Satış · Pazarlama · Yönetici"),
-        "Sipariş noktası": ("Sipariş noktası = ort. günlük talep × temin süresi + güvenlik stoğu", "Güvenlik stoğu = z × talep sapması × √temin süresi. Stok seviyesi bu noktaya inince sipariş verilir.", "Tedarik"),
-        "Talep tahmini": ("Üç yöntemden 4 haftalık hatası en küçük olan seçilir", "Son 4 hafta ortalaması, son 8 hafta ortalaması ve sönümlü trend. Hata, geçmişte denenerek ölçülür.", "Tedarik · Yönetici"),
+        "Churn riski": ("Risk = P(30 gün içinde sipariş vermeme)", "Geçmiş sipariş sıklığı, son siparişten geçen süre ve tutarlardan öğrenen bir model hesaplar; son 180 günde aktif müşterilerle eğitilir ve zaman sıralı testte doğrulanır. %70 ve üzeri yüksek risk.", "Satış · Pazarlama · Yönetici"),
+        "Sipariş noktası": ("Sipariş noktası = haftalık tahmin × tedarik süresi + güvenlik stoğu", "Güvenlik stoğu = z × haftalık tahmin hatası sapması × √tedarik süresi; z döngü hizmet seviyesinden gelir. Stok bu noktaya inince sipariş verilir.", "Tedarik"),
+        "Talep tahmini": ("Dört yöntemden 4 haftalık hatası en küçük olan seçilir", "Son 4 ve 8 hafta ortalaması, parametreleri veriden seçilen sönümlü trend (Holt) ve aralıklı talep için Croston-SBA. Hata geçmişte denenerek ölçülür.", "Tedarik · Yönetici"),
     }
     with st.container(border=True):
         ui.bolum(6, "Metrik sözlüğü", "Bir metriğe bas: formülü ve hangi sayfada kullanıldığını gör")
         sec = st.radio("Metrik", list(SOZLUK), horizontal=True, label_visibility="collapsed", key="kal_metrik")
         f, a, y = SOZLUK[sec]
-        st.markdown(f"<div style='background:#faf7f2;border-radius:10px;padding:12px 14px'><div style='font-family:Poppins;font-weight:700'>{f}</div>"
+        st.markdown(f"<div style='background:var(--side);border-radius:10px;padding:12px 14px'><div style='font-family:Poppins;font-weight:700'>{f}</div>"
                     f"<div style='font-size:12px;margin:4px 0'>{a}</div><span class='pill'>{y}</span></div>", unsafe_allow_html=True)
 
     # 7
     with st.container(border=True):
         ui.bolum(7, "İşlenmiş veriden örnek 5 satır")
         gos = [c for c in ["InvoiceNo", "gun", "CustomerID", "Description", "Category", "City", "Quantity", "UnitPrice", "gross", "net", "disc"] if c in tum.columns]
-        st.dataframe(tum[gos].head(5), hide_index=True, use_container_width=True)
+        st.dataframe(tum[gos].head(5), hide_index=True, width="stretch")
 
     bilgi = {"ciro": f"{ui.sayi(tem)} satırın tamamı kullanıldı (ham {ui.sayi(ham)}, atılan {ui.sayi(atilan)}).",
              "indirim": f"{ui.sayi(asan_say)} sipariş kategori normunun 10 puan üstünde indirimli; fazlası ≈ {ui.tl(fazla)}.",

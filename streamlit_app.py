@@ -3864,8 +3864,8 @@ def sayfa_pazarlama():
             o3.markdown(f"<div class='out'><div class='t'>En iyi kohort (1. çeyrek sonrası)</div><div class='v'>{en[0]} · %{ui.sayi(en[2][0], 0)}</div></div>", unsafe_allow_html=True)
             tip = w.info("Satır: ilk siparişini o çeyrekte veren müşteriler. Sütun: bu müşterilerin ilk siparişten 1, 2 ve 3 çeyrek sonra, o çeyrekte en az bir sipariş verenlerin yüzdesi. Boş hücre: veri henüz o çeyreğe ulaşmıyor.")
             h = (f"<table class='t' style='margin-top:10px'><thead><tr><th>İlk sipariş çeyreği{tip}</th><th class='r'>İlk kez sipariş veren</th>"
-                 "<th style='text-align:center'>Sonraki çeyrekte sipariş verenler</th><th style='text-align:center'>2. çeyrekte tekrar sipariş verenler</th>"
-                 "<th style='text-align:center'>3. çeyrekte tekrar sipariş verenler</th></tr></thead><tbody>")
+                 "<th style='text-align:center'>Sonraki çeyrekte sipariş verenler</th><th style='text-align:center'>2 çeyrek sonra sipariş verenler</th>"
+                 "<th style='text-align:center'>3 çeyrek sonra sipariş verenler</th></tr></thead><tbody>")
             for lab, n, yuz in KS:
                 h += f"<tr><td style='font-weight:600'>{lab}</td><td class='r'>{ui.sayi(n)}</td>"
                 for v in yuz:

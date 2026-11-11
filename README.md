@@ -51,4 +51,4 @@ requirements.txt                  Kütüphaneler
 
 ## Ekip
 
-Hilal Barut, Selin Özen ve grup arkadaşı. Satış & Fiyat ile Veri yükle sayfaları Selin'e aittir.
+Hilal Barut, Selin Özen ve Selin Erem Deniz. Satış & Fiyat ile Veri yükle sayfaları Selin'e aittir.
